@@ -2,7 +2,7 @@
 
 Package Upgrade Guard is an Emacs security tool that shows diffs for all package upgrades and installations, helping users review changes before proceeding. It supports both ELPA/MELPA packages and VC (version control) packages.
 
-Note: Starting with Emacs 31, similar package-upgrade review functionality is available in upstream Emacs. This package is still useful for earlier Emacs versions (for example, Emacs 27.1-30).
+⚠️ Note: Starting with Emacs 31, similar package-upgrade review functionality is available in upstream Emacs. This package is still useful for earlier Emacs versions (for example, Emacs 27.1-30).
 
 * Features
 
