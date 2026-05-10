@@ -12,12 +12,13 @@
 ;;; Code:
 
 (require 'diff)
+(require 'subr-x)
 (require 'package-upgrade-guard-constants)
 (require 'package-upgrade-guard-utils)
 
 (defun package-upgrade-guard--show-simple-diff
     (old-content new-content)
-  "Show a simple line-by-line comparison when full diff fails."
+  "Show a simple comparison between OLD-CONTENT and NEW-CONTENT."
   (let ((old-lines (split-string old-content "\n" t))
         (new-lines (split-string new-content "\n" t))
         (max-lines package-upgrade-guard--max-diff-lines)

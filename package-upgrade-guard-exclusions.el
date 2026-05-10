@@ -12,10 +12,12 @@
 ;;; Code:
 
 (require 'package)
+(require 'subr-x)
 (require 'package-upgrade-guard-constants)
+(require 'package-upgrade-guard-utils)
 
 (defun package-upgrade-guard--package-excluded-p (pkg-desc)
-  "Check if package PKG-DESC should be excluded from security checks.
+  "Return non-nil if PKG-DESC should be excluded from security review.
 Returns t if the package's archive or name is in the excluded lists."
   (when pkg-desc
     (let ((pkg-name (package-desc-name pkg-desc))
@@ -37,10 +39,11 @@ Returns t if the package's archive or name is in the excluded lists."
         ;; If archive is nil, try to find it from package-archive-contents
         ;; But for VC packages, archive info might not be available
         (when (null archive)
-          (let ((available (assq pkg-name package-archive-contents)))
-            (when available
-              (setq archive
-                    (package-desc-archive (cadr available))))))
+          (when-let ((available
+                      (package-upgrade-guard--package-desc
+                       pkg-name 'archive)))
+            (setq archive
+                  (package-desc-archive available))))
         (setq excluded-by-archive
               (and archive
                    (member
@@ -51,7 +54,7 @@ Returns t if the package's archive or name is in the excluded lists."
       (or excluded-by-name excluded-by-archive))))
 
 (defun package-upgrade-guard--get-exclusion-reason (pkg-desc)
-  "Get human-readable reason for package exclusion."
+  "Return the human-readable exclusion reason for PKG-DESC."
   (when pkg-desc
     (let ((pkg-name (package-desc-name pkg-desc))
           (archive (package-desc-archive pkg-desc)))
@@ -72,11 +75,11 @@ Returns t if the package's archive or name is in the excluded lists."
          (progn
            ;; If archive is nil, try to find it from package-archive-contents
            (when (null archive)
-             (let ((available
-                    (assq pkg-name package-archive-contents)))
-               (when available
-                 (setq archive
-                       (package-desc-archive (cadr available))))))
+             (when-let ((available
+                         (package-upgrade-guard--package-desc
+                          pkg-name 'archive)))
+               (setq archive
+                     (package-desc-archive available))))
            (and archive
                 (member
                  archive package-upgrade-guard-excluded-archives))))

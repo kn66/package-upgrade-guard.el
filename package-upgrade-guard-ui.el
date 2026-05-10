@@ -158,7 +158,7 @@ Returns t if user approves, nil if rejected."
       ;; Show main .el file if it exists
       (let ((main-el-files
              (condition-case nil
-                 (directory-files pkg-dir nil "\\.el$")
+                 (directory-files pkg-dir nil "\\.el\\'")
                (error
                 nil))))
         (when main-el-files

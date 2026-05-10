@@ -11,22 +11,6 @@
 
 ;;; Code:
 
-;; Constants
-(defconst package-upgrade-guard--tar-header-size 512
-  "Size of TAR header in bytes.")
-
-(defconst package-upgrade-guard--tar-filename-offset 0
-  "Offset for filename in TAR header.")
-
-(defconst package-upgrade-guard--tar-filename-size 100
-  "Size of filename field in TAR header.")
-
-(defconst package-upgrade-guard--tar-size-offset 124
-  "Offset for file size in TAR header.")
-
-(defconst package-upgrade-guard--tar-size-length 12
-  "Length of file size field in TAR header.")
-
 (defconst package-upgrade-guard--max-diff-lines 20
   "Maximum number of diff lines to show.")
 
@@ -59,23 +43,39 @@
   :type '(choice (const :tag "Default" nil) (directory :tag "Directory"))
   :group 'package-upgrade-guard)
 
+(defcustom package-upgrade-guard-prefer-built-in-review t
+  "Use Emacs' built-in package review support when available.
+This delegates archive package review to `package-review-policy'
+on Emacs versions that provide it.  VC package upgrades still use
+package-upgrade-guard's review."
+  :type 'boolean
+  :group 'package-upgrade-guard)
+
 (defcustom package-upgrade-guard-excluded-archives nil
   "List of package archives to exclude from security checks.
-Each element should be a string matching an archive name from `package-archives'.
-For example: '(\"gnu\" \"nongnu\") to exclude GNU ELPA and NonGNU ELPA."
+Each element should be a string matching an archive name from
+`package-archives'.  For example, list \"gnu\" and \"nongnu\" to
+exclude GNU ELPA and NonGNU ELPA."
   :type '(repeat string)
   :group 'package-upgrade-guard)
 
 (defcustom package-upgrade-guard-excluded-packages nil
   "List of package names to exclude from security checks.
 Each element should be a symbol or string matching a package name.
-For example: '(magit org-mode helm) to exclude specific packages."
+For example, use a list such as (magit org-mode helm) to exclude specific
+packages."
   :type '(repeat (choice symbol string))
   :group 'package-upgrade-guard)
 
 ;; Internal variables
 (defvar package-upgrade-guard--temp-dir nil
   "Actual temporary directory used for security checks.")
+
+(defvar package-upgrade-guard--saved-package-review-policy nil
+  "Previous value of `package-review-policy' before enabling guard.")
+
+(defvar package-upgrade-guard--saved-package-review-policy-bound nil
+  "Non-nil if `package-review-policy' was bound before enabling guard.")
 
 (provide 'package-upgrade-guard-constants)
 
