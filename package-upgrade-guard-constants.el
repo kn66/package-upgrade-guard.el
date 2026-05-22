@@ -20,6 +20,9 @@
 (defconst package-upgrade-guard--line-truncate-length 80
   "Maximum length for truncated lines in diff output.")
 
+(defconst package-upgrade-guard--max-unified-diff-size 200000
+  "Maximum characters of unified diff output to insert per file.")
+
 (defconst package-upgrade-guard--buffer-names
   '("*Package Security Diff*"
     "*Package VC Diff*"
@@ -39,7 +42,7 @@
   :group 'package-upgrade-guard)
 
 (defcustom package-upgrade-guard-temp-dir nil
-  "Directory for temporarily storing packages during security checks."
+  "Base directory for temporary package review session directories."
   :type '(choice (const :tag "Default" nil) (directory :tag "Directory"))
   :group 'package-upgrade-guard)
 
@@ -62,8 +65,8 @@ exclude GNU ELPA and NonGNU ELPA."
 (defcustom package-upgrade-guard-excluded-packages nil
   "List of package names to exclude from security checks.
 Each element should be a symbol or string matching a package name.
-For example, use a list such as (magit org-mode helm) to exclude specific
-packages."
+For example, use a list such as `magit', `org-mode', and `helm'
+to exclude specific packages."
   :type '(repeat (choice symbol string))
   :group 'package-upgrade-guard)
 

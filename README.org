@@ -1,6 +1,6 @@
 * Overview
 
-Package Upgrade Guard is an Emacs security tool that shows diffs for all package upgrades and installations, helping users review changes before proceeding. It supports both ELPA/MELPA packages and VC (version control) packages.
+Package Upgrade Guard is an Emacs security tool that shows diffs for package upgrades and installations, helping users review changes before proceeding. It supports ELPA/MELPA packages and, on Emacs versions with ~package-vc~, git-based VC (version control) package upgrades.
 
 ⚠️ Note: Starting with Emacs 31, similar package-upgrade review functionality is available in upstream Emacs. This package is still useful for earlier Emacs versions (for example, Emacs 27.1-30).
 
@@ -9,7 +9,8 @@ Package Upgrade Guard is an Emacs security tool that shows diffs for all package
 - 🔍 Shows diffs for package upgrades before installation
 - 📦 Supports both tarball packages (ELPA/MELPA) and VC packages (git repositories)
 - 🛡️ Security-focused review process with user approval prompts
-- 🔄 Works with ~package-upgrade~, ~package-upgrade-all~, and package menu operations
+- 🔄 Works with ~package-install~, ~package-upgrade~, ~package-upgrade-all~, and package menu operations
+- 🔗 Reviews package dependencies before they are installed
 - 📊 Displays file-by-file changes, new files, and deleted files
 - ⚡ Efficient TAR extraction for package analysis
 - ⚙️ Archive exclusion for trusted sources (auto-approve without diff review)
@@ -32,8 +33,9 @@ Package Upgrade Guard is an Emacs security tool that shows diffs for all package
 
 * Usage
 
-Once enabled, Package Diff Guard automatically intercepts:
+Once enabled, Package Upgrade Guard automatically intercepts:
 
+- ~M-x package-install~ - Shows package contents/diff before installing
 - ~M-x package-upgrade~ - Shows diff before upgrading individual packages
 - ~M-x package-upgrade-all~ - Reviews each package individually
 - Package menu operations (mark packages with ~U~ or ~I~, then ~x~)
@@ -51,7 +53,7 @@ Once enabled, Package Diff Guard automatically intercepts:
 For git-based VC packages, the tool shows:
 - Git status
 - New commits to be pulled
-- Detailed diff of changes
+- Detailed diff of changes from the configured upstream branch
 
 ** Regular Packages
 
@@ -60,6 +62,7 @@ For ELPA/MELPA packages, the tool shows:
 - New files added
 - Files removed
 - Version information
+- Dependency packages that will also be installed
 
 * Exclusion Configuration
 
@@ -126,7 +129,7 @@ Note: ~"melpa"~ and other third-party archives should generally not be excluded 
 ;; Enable/disable the security checker
 (setopt package-upgrade-guard-enabled t)
 
-;; Custom temporary directory for package extraction
+;; Custom base directory for temporary package review sessions
 (setopt package-upgrade-guard-temp-dir "/path/to/temp/dir")
 
 ;; Exclude trusted archives from diff checking (auto-approve)
@@ -141,28 +144,29 @@ Note: ~"melpa"~ and other third-party archives should generally not be excluded 
 The package provides several customization options through the ~package-upgrade-guard~ group:
 
 - ~package-upgrade-guard-enabled~ - Global enable/disable
-- ~package-upgrade-guard-temp-dir~ - Custom temporary directory
+- ~package-upgrade-guard-temp-dir~ - Custom base directory for temporary review sessions
 - ~package-upgrade-guard-excluded-archives~ - List of archive names to auto-approve
 - ~package-upgrade-guard-excluded-packages~ - List of package names to auto-approve
 
 * Requirements
 
 - Emacs 27.1 or later
-- Standard packages: ~package~, ~diff~, ~vc-git~
+- Standard packages: ~package~ and ~diff~
+- Git-based VC upgrade review requires Emacs' ~package-vc~ support and ~git~ in your PATH
 
 * Security Considerations
 
-Package Diff Guard is designed for defensive security purposes:
+Package Upgrade Guard is designed for defensive security purposes:
 
 - Helps identify potentially malicious changes in package updates
 - Provides transparency into what code changes are being installed
 - Allows users to make informed decisions about package upgrades
-- Creates audit trails for package modifications
+- Shows the reviewed changes before package modifications are applied
 
 * Limitations
 
-- Large packages may show truncated diffs for performance
-- Binary files are not diffed (shown as modified)
+- Large packages may show truncated per-file diffs for performance
+- Binary files are not text-diffed (shown as modified with size changes)
 - Requires manual review for each package upgrade
 - Temporary files are created during analysis
 
@@ -171,7 +175,7 @@ Package Diff Guard is designed for defensive security purposes:
 ** Common Issues
 
 *** Temporary Directory Errors
-If you encounter permission errors, set a custom temporary directory:
+If you encounter permission errors, set a custom temporary base directory:
 
 #+BEGIN_SRC emacs-lisp
 (setopt package-upgrade-guard-temp-dir "~/tmp/package-upgrade-guard")
@@ -198,6 +202,7 @@ MIT license
 
 * Version History
 
+- v1.3.0 - Added direct ~package-install~ and dependency review, safer package-menu upgrade rejection, VC upstream detection, binary-file diff handling, and ERT coverage
 - v1.2.0 - Added package-name exclusion and package-vc-upgrade support
 - v1.1.0 - Added archive exclusion functionality for trusted sources
 - v1.0.0 - Initial release with tarball and VC package support

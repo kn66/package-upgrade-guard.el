@@ -12,12 +12,62 @@
 ;;; Code:
 
 (require 'diff)
+(require 'subr-x)
 (require 'vc-git)
 (require 'package-upgrade-guard-constants)
 (require 'package-upgrade-guard-utils)
 (require 'package-upgrade-guard-exclusions)
 (require 'package-upgrade-guard-tar)
 (require 'package-upgrade-guard-diff)
+
+(defun package-upgrade-guard--git-output (directory &rest args)
+  "Return trimmed git output for ARGS in DIRECTORY, or nil on failure."
+  (let ((default-directory directory))
+    (with-temp-buffer
+      (when (equal 0 (apply #'call-process "git" nil t nil args))
+        (string-trim (buffer-string))))))
+
+(defun package-upgrade-guard--git-upstream (directory)
+  "Return the upstream revision for DIRECTORY, or nil if none is set."
+  (let ((upstream
+         (package-upgrade-guard--git-output
+          directory
+          "rev-parse"
+          "--abbrev-ref"
+          "--symbolic-full-name"
+          "@{upstream}")))
+    (or (and upstream
+             (not (string-empty-p upstream))
+             upstream)
+        (let ((remote-head
+               (package-upgrade-guard--git-output
+                directory
+                "symbolic-ref"
+                "--short"
+                "refs/remotes/origin/HEAD")))
+          (and remote-head
+               (not (string-empty-p remote-head))
+               remote-head)))))
+
+(defun package-upgrade-guard--insert-git-command
+    (directory empty-message &rest args)
+  "Run git ARGS in DIRECTORY and insert output.
+When the command succeeds without output, insert EMPTY-MESSAGE if
+it is non-nil.  Return non-nil on success."
+  (let ((default-directory directory)
+        (start (point)))
+    (let ((status (apply #'call-process "git" nil t nil args)))
+      (cond
+       ((equal status 0)
+        (when (and empty-message (= start (point)))
+          (insert empty-message "\n"))
+        t)
+       (t
+        (insert
+         (format "\n[git %s exited with status %s]\n"
+                 (mapconcat #'identity args " ")
+                 status))
+        nil)))))
 
 (defun package-upgrade-guard--show-tarball-diff (pkg-desc)
   "Show diff for tarball package PKG-DESC."
@@ -82,53 +132,43 @@ Returns t if user approves, nil if rejected."
         ;; Show current status
         (insert "=== Git Status ===\n")
         (condition-case err
-            (call-process "git" nil t nil "status" "--porcelain")
+            (package-upgrade-guard--insert-git-command
+             pkg-dir "Working tree clean" "status" "--short" "--branch")
           (error
            (insert (format "Error getting git status: %s\n" err))))
 
         ;; Fetch latest changes
         (insert "\n=== Fetching latest changes ===\n")
         (condition-case err
-            (progn
-              (call-process "git" nil t nil "fetch")
-              (insert "Fetch completed\n"))
+            (package-upgrade-guard--insert-git-command
+             pkg-dir "Fetch completed" "fetch")
           (error
            (insert (format "Error fetching: %s\n" err))))
 
-        ;; Show what commits will be pulled
-        (insert "\n=== New commits to be pulled ===\n")
-        (condition-case err
-            (let ((result
-                   (call-process "git"
-                                 nil
-                                 t
-                                 nil
-                                 "log"
-                                 "--oneline"
-                                 "HEAD..origin/HEAD")))
-              (when (and (= result 0)
-                         (= (line-beginning-position)
-                            (line-end-position)))
-                (insert "No new commits\n")))
-          (error
-           (insert (format "Error getting commit log: %s\n" err))))
+        (let ((upstream
+               (package-upgrade-guard--git-upstream pkg-dir)))
+          (if (not upstream)
+              (insert
+               "\nNo upstream branch found; cannot compute incoming diff.\n")
+            ;; Show what commits will be pulled
+            (insert
+             (format "\n=== New commits to be pulled from %s ===\n"
+                     upstream))
+            (condition-case err
+                (package-upgrade-guard--insert-git-command
+                 pkg-dir "No new commits" "log" "--oneline"
+                 (format "HEAD..%s" upstream))
+              (error
+               (insert (format "Error getting commit log: %s\n" err))))
 
-        ;; Show detailed diff
-        (insert "\n=== Detailed diff ===\n")
-        (condition-case err
-            (let ((result
-                   (call-process "git"
-                                 nil
-                                 t
-                                 nil
-                                 "diff"
-                                 "HEAD..origin/HEAD")))
-              (when (and (= result 0)
-                         (= (line-beginning-position)
-                            (line-end-position)))
-                (insert "No changes in diff\n")))
-          (error
-           (insert (format "Error getting diff: %s\n" err))))
+            ;; Show detailed diff
+            (insert "\n=== Detailed diff ===\n")
+            (condition-case err
+                (package-upgrade-guard--insert-git-command
+                 pkg-dir "No changes in diff" "diff"
+                 (format "HEAD..%s" upstream))
+              (error
+               (insert (format "Error getting diff: %s\n" err))))))
 
         (diff-mode)
         (read-only-mode 1)

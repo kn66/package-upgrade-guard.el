@@ -17,25 +17,34 @@
 
 ;; Temporary directory management
 (defun package-upgrade-guard--get-temp-dir ()
-  "Return the temporary directory for security review."
-  (unless package-upgrade-guard--temp-dir
-    (setq package-upgrade-guard--temp-dir
-          (or package-upgrade-guard-temp-dir
-              (expand-file-name "package-upgrade-guard"
-                                temporary-file-directory))))
+  "Return the session temporary directory for security review."
   (condition-case err
       (progn
+        (unless package-upgrade-guard--temp-dir
+          (let* ((base-dir
+                  (file-name-as-directory
+                   (or package-upgrade-guard-temp-dir
+                       (expand-file-name "package-upgrade-guard"
+                                         temporary-file-directory))))
+                 (session-prefix
+                  (expand-file-name "session-" base-dir)))
+            (make-directory base-dir t)
+            (setq package-upgrade-guard--temp-dir
+                  (file-name-as-directory
+                   (make-temp-file session-prefix t)))))
         (unless (file-exists-p package-upgrade-guard--temp-dir)
           (make-directory package-upgrade-guard--temp-dir t))
         package-upgrade-guard--temp-dir)
-    (error
-     (error
-      "Failed to create temporary directory %s: %s"
-      package-upgrade-guard--temp-dir
-      (error-message-string err)))))
+      (error
+       (error
+        "Failed to create temporary directory %s: %s"
+        (or package-upgrade-guard--temp-dir
+            package-upgrade-guard-temp-dir
+            temporary-file-directory)
+        (error-message-string err)))))
 
 (defun package-upgrade-guard--cleanup-temp-dir ()
-  "Clean up temporary directory."
+  "Clean up the session temporary directory."
   (when (and package-upgrade-guard--temp-dir
              (file-exists-p package-upgrade-guard--temp-dir))
     (condition-case err
@@ -43,7 +52,8 @@
       (error
        (message "Warning: Failed to cleanup temp directory %s: %s"
                 package-upgrade-guard--temp-dir
-                (error-message-string err))))))
+                (error-message-string err)))))
+  (setq package-upgrade-guard--temp-dir nil))
 
 ;; File handling utilities
 (defun package-upgrade-guard--safe-read-file
@@ -81,6 +91,13 @@ SOURCE should be `installed' or `archive'."
            (cadr (assq package-name package-alist)))
           ('archive
            (cadr (assq package-name package-archive-contents)))))))
+
+(defun package-upgrade-guard--package-vc-p (pkg-desc)
+  "Return non-nil when PKG-DESC describes a VC package.
+Older supported Emacs versions do not provide `package-vc-p', so
+guard callers must use this compatibility wrapper."
+  (and (fboundp 'package-vc-p)
+       (package-vc-p pkg-desc)))
 
 (defun package-upgrade-guard--find-installed-package-dir (pkg-name)
   "Find installed third-party package directory for PKG-NAME."

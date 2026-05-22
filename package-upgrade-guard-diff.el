@@ -88,6 +88,31 @@
          (format "  ... [truncated, showing first %d changes] ...\n"
                  package-upgrade-guard--max-diff-lines))))))
 
+(defun package-upgrade-guard--file-size (file)
+  "Return FILE size in bytes, or 0 if it cannot be read."
+  (or (nth 7 (file-attributes file)) 0))
+
+(defun package-upgrade-guard--binary-file-p (file)
+  "Return non-nil when FILE appears to contain binary data."
+  (when (file-regular-p file)
+    (condition-case nil
+        (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (let ((coding-system-for-read 'no-conversion))
+            (insert-file-contents-literally file nil 0 4096))
+          (goto-char (point-min))
+          (search-forward (string 0) nil t))
+      (error nil))))
+
+(defun package-upgrade-guard--insert-truncated-content
+    (content max-size)
+  "Insert CONTENT, truncating it to MAX-SIZE characters when needed."
+  (if (<= (length content) max-size)
+      (insert content)
+    (insert (substring content 0 max-size))
+    (insert
+     (format "\n... [truncated after %d characters] ...\n" max-size))))
+
 (defun package-upgrade-guard--generate-diff (old-dir new-dir)
   "Generate diff between OLD-DIR and NEW-DIR."
   (insert
@@ -128,31 +153,42 @@
           ;; Both files exist - show diff
           (if (file-directory-p old-file)
               (insert "Directory (skipped)\n")
-            (let ((old-content
-                   (package-upgrade-guard--safe-read-file old-file))
-                  (new-content
-                   (package-upgrade-guard--safe-read-file new-file)))
-              (if (string= old-content new-content)
-                  (insert "No changes\n")
-                (insert "File modified - showing unified diff:\n")
-                (condition-case err
-                    (let ((diff-result
-                           (diff-no-select
-                            old-file new-file nil 'noasync)))
-                      (when diff-result
-                        (let ((diff-content
-                               (with-current-buffer diff-result
-                                 (buffer-string))))
-                          (insert diff-content))
-                        (kill-buffer diff-result)))
-                  (error
-                   ;; Fallback: show manual diff using simple line comparison
-                   (insert
-                    (format "  Diff generation failed: %s\n"
-                            (error-message-string err)))
-                   (insert "  Showing simple comparison:\n")
-                   (package-upgrade-guard--show-simple-diff
-                    old-content new-content)))))))
+            (if (or (package-upgrade-guard--binary-file-p old-file)
+                    (package-upgrade-guard--binary-file-p new-file))
+                (insert
+                 (format
+                  "Binary file modified (%d → %d bytes); textual diff skipped\n"
+                  (package-upgrade-guard--file-size old-file)
+                  (package-upgrade-guard--file-size new-file)))
+              (let ((old-content
+                     (package-upgrade-guard--safe-read-file old-file))
+                    (new-content
+                     (package-upgrade-guard--safe-read-file new-file)))
+                (if (string= old-content new-content)
+                    (insert "No changes\n")
+                  (insert "File modified - showing unified diff:\n")
+                  (condition-case err
+                      (let ((diff-result
+                             (diff-no-select
+                              old-file new-file nil 'noasync)))
+                        (unwind-protect
+                            (when diff-result
+                              (let ((diff-content
+                                     (with-current-buffer diff-result
+                                       (buffer-string))))
+                                (package-upgrade-guard--insert-truncated-content
+                                 diff-content
+                                 package-upgrade-guard--max-unified-diff-size)))
+                          (when (buffer-live-p diff-result)
+                            (kill-buffer diff-result))))
+                    (error
+                     ;; Fallback: show manual diff using simple line comparison
+                     (insert
+                      (format "  Diff generation failed: %s\n"
+                              (error-message-string err)))
+                     (insert "  Showing simple comparison:\n")
+                     (package-upgrade-guard--show-simple-diff
+                      old-content new-content))))))))
          ((file-exists-p new-file)
           ;; New file
           (insert "New file added:\n")
