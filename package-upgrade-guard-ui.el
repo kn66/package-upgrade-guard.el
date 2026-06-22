@@ -163,10 +163,23 @@ Returns t if user approves, nil if rejected."
 
             ;; Show detailed diff
             (insert "\n=== Detailed diff ===\n")
+            (when (package-upgrade-guard--security-diff-only-p)
+              (insert "Diff mode: security-sensitive hunks only\n"))
             (condition-case err
-                (package-upgrade-guard--insert-git-command
-                 pkg-dir "No changes in diff" "diff"
-                 (format "HEAD..%s" upstream))
+                (if (package-upgrade-guard--security-diff-only-p)
+                    (let* ((diff-content
+                            (package-upgrade-guard--git-output
+                             pkg-dir "diff" (format "HEAD..%s" upstream)))
+                           (filtered
+                            (and diff-content
+                                 (package-upgrade-guard--filter-security-unified-diff
+                                  diff-content))))
+                      (if (and filtered (not (string-empty-p filtered)))
+                          (insert filtered "\n")
+                        (insert "No security-sensitive hunks matched current patterns\n")))
+                  (package-upgrade-guard--insert-git-command
+                   pkg-dir "No changes in diff" "diff"
+                   (format "HEAD..%s" upstream)))
               (error
                (insert (format "Error getting diff: %s\n" err))))))
 

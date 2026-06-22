@@ -132,6 +132,9 @@ Note: ~"melpa"~ and other third-party archives should generally not be excluded 
 ;; Custom base directory for temporary package review sessions
 (setopt package-upgrade-guard-temp-dir "/path/to/temp/dir")
 
+;; Show only security-sensitive diff hunks
+(setopt package-upgrade-guard-diff-mode 'security)
+
 ;; Exclude trusted archives from diff checking (auto-approve)
 (setopt package-upgrade-guard-excluded-archives '("gnu"))
 
@@ -145,6 +148,8 @@ The package provides several customization options through the ~package-upgrade-
 
 - ~package-upgrade-guard-enabled~ - Global enable/disable
 - ~package-upgrade-guard-temp-dir~ - Custom base directory for temporary review sessions
+- ~package-upgrade-guard-diff-mode~ - Show all diffs or only security-sensitive hunks
+- ~package-upgrade-guard-security-diff-regexp-list~ - Regexps used by security-only diff mode
 - ~package-upgrade-guard-excluded-archives~ - List of archive names to auto-approve
 - ~package-upgrade-guard-excluded-packages~ - List of package names to auto-approve
 

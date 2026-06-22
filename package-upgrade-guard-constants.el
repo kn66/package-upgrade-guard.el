@@ -54,6 +54,46 @@ package-upgrade-guard's review."
   :type 'boolean
   :group 'package-upgrade-guard)
 
+(defcustom package-upgrade-guard-diff-mode 'all
+  "How much diff content to show during package review.
+When set to `all', show the normal package diff.  When set to
+`security', show only diff hunks that match
+`package-upgrade-guard-security-diff-regexp-list'."
+  :type '(choice (const :tag "Show all diff content" all)
+                 (const :tag "Show only security-sensitive hunks" security))
+  :group 'package-upgrade-guard)
+
+(defcustom package-upgrade-guard-security-diff-regexp-list
+  (list
+   (rx symbol-start
+       (or "eval" "funcall" "apply" "load" "load-file" "load-library"
+           "read" "read-from-string" "intern" "fset" "defalias"
+           "advice-add" "add-function" "defadvice")
+       symbol-end)
+   (rx symbol-start
+       (or "shell-command" "async-shell-command" "call-process"
+           "call-process-shell-command" "process-file" "start-process"
+           "start-file-process" "make-process")
+       symbol-end)
+   (rx symbol-start
+       (or "url-retrieve" "url-retrieve-synchronously" "url-copy-file"
+           "make-network-process" "open-network-stream")
+       symbol-end)
+   (rx symbol-start
+       (or "write-region" "delete-file" "delete-directory" "rename-file"
+           "copy-file" "set-file-modes")
+       symbol-end)
+   (rx symbol-start
+       (or "package-install" "package-vc-install" "package-refresh-contents"
+           "straight-use-package" "quelpa")
+       symbol-end)
+   (rx (or "http://" "https://" "curl " "wget ")))
+  "Regexps used by `package-upgrade-guard-diff-mode' value `security'.
+A diff hunk is shown when at least one added or removed line
+matches any regexp in this list."
+  :type '(repeat regexp)
+  :group 'package-upgrade-guard)
+
 (defcustom package-upgrade-guard-excluded-archives nil
   "List of package archives to exclude from security checks.
 Each element should be a string matching an archive name from
