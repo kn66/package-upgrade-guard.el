@@ -17,6 +17,13 @@
 (require 'package-upgrade-guard-constants)
 (require 'package-upgrade-guard-utils)
 
+(defvar package-upgrade-guard--security-review-complete t
+  "Non-nil while the current security diff can be checked completely.")
+
+(defun package-upgrade-guard--file-read-error-p (content)
+  "Return non-nil when CONTENT is an error from the safe file reader."
+  (string-prefix-p "[Error reading file:" content))
+
 (defun package-upgrade-guard--show-simple-diff
     (old-content new-content)
   "Show a simple comparison between OLD-CONTENT and NEW-CONTENT."
@@ -214,7 +221,11 @@
   (condition-case err
       (let ((diff-result (diff-no-select old-file new-file nil 'noasync)))
         (unwind-protect
-            (when diff-result
+            (if (not diff-result)
+                (progn
+                  (when (package-upgrade-guard--security-diff-only-p)
+                    (setq package-upgrade-guard--security-review-complete nil))
+                  nil)
               (let ((diff-content
                      (with-current-buffer diff-result
                        (buffer-string))))
@@ -235,6 +246,8 @@
           (when (buffer-live-p diff-result)
             (kill-buffer diff-result))))
     (error
+     (when (package-upgrade-guard--security-diff-only-p)
+       (setq package-upgrade-guard--security-review-complete nil))
      (unless (package-upgrade-guard--security-diff-only-p)
        (with-temp-buffer
          (insert
@@ -255,6 +268,10 @@
     (if (package-upgrade-guard--security-diff-only-p)
         (let ((matches
                (package-upgrade-guard--security-content-lines content "+")))
+          (when (or (package-upgrade-guard--file-read-error-p content)
+                    (> (package-upgrade-guard--file-size new-file)
+                       package-upgrade-guard--max-unified-diff-size))
+            (setq package-upgrade-guard--security-review-complete nil))
           (when matches
             (concat "New file added - showing security-sensitive lines:\n"
                     matches)))
@@ -287,6 +304,10 @@
        (t
         (let ((old-content (package-upgrade-guard--safe-read-file old-file))
               (new-content (package-upgrade-guard--safe-read-file new-file)))
+          (when (and (package-upgrade-guard--security-diff-only-p)
+                     (or (package-upgrade-guard--file-read-error-p old-content)
+                         (package-upgrade-guard--file-read-error-p new-content)))
+            (setq package-upgrade-guard--security-review-complete nil))
           (if (string= old-content new-content)
               (unless (package-upgrade-guard--security-diff-only-p)
                 "No changes\n")
@@ -299,14 +320,17 @@
         "File deleted\n")))))
 
 (defun package-upgrade-guard--generate-diff (old-dir new-dir)
-  "Generate diff between OLD-DIR and NEW-DIR."
+  "Generate diff between OLD-DIR and NEW-DIR.
+In security diff mode, return the number of files with matching hunks."
   (insert
    (format "Comparing directories:\n  Old: %s\n  New: %s\n\n"
            old-dir
            new-dir))
   (when (package-upgrade-guard--security-diff-only-p)
     (insert "Diff mode: security-sensitive hunks only\n\n"))
-  (let ((file-set (make-hash-table :test 'equal))
+  (let ((package-upgrade-guard--security-review-complete t)
+        (file-set (make-hash-table :test 'equal))
+        (matched-files 0)
         (skipped-files 0))
     (dolist (file (when (file-exists-p old-dir)
                     (directory-files-recursively old-dir ".*")))
@@ -319,13 +343,23 @@
              (package-upgrade-guard--file-diff-section
               rel-file old-dir new-dir)))
         (if section
-            (insert (format "\n=== %s ===\n%s" rel-file section))
+            (progn
+              (insert (format "\n=== %s ===\n%s" rel-file section))
+              (when (package-upgrade-guard--security-diff-only-p)
+                (setq matched-files (1+ matched-files))))
           (when (package-upgrade-guard--security-diff-only-p)
             (setq skipped-files (1+ skipped-files))))))
     (when (package-upgrade-guard--security-diff-only-p)
       (insert
        (format "\nSecurity diff filter skipped %d file(s) with no matching hunks.\n"
-               skipped-files)))))
+               skipped-files)))
+    (when (and (package-upgrade-guard--security-diff-only-p)
+               (not package-upgrade-guard--security-review-complete))
+      (insert
+       "Security diff check was incomplete; manual approval is required.\n"))
+    (when (and (package-upgrade-guard--security-diff-only-p)
+               package-upgrade-guard--security-review-complete)
+      matched-files)))
 
 (provide 'package-upgrade-guard-diff)
 

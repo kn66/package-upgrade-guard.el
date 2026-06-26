@@ -212,6 +212,132 @@ DIR is used as the descriptor's installed directory when non-nil."
        "(message \"safe\")\n(call-process \"sh\" nil nil nil \"-c\" \"id\")"
        "+")))))
 
+(ert-deftest package-upgrade-guard-security-diff-counts-matching-files ()
+  "Security diff generation should report files requiring review."
+  (let ((old-dir (make-temp-file "package-guard-old-" t))
+        (new-dir (make-temp-file "package-guard-new-" t))
+        (package-upgrade-guard-diff-mode 'security))
+    (unwind-protect
+        (progn
+          (write-region "(message \"old\")\n" nil
+                        (expand-file-name "safe.el" old-dir) nil 'silent)
+          (write-region "(message \"new\")\n" nil
+                        (expand-file-name "safe.el" new-dir) nil 'silent)
+          (write-region "(message \"old\")\n" nil
+                        (expand-file-name "risky.el" old-dir) nil 'silent)
+          (write-region "(shell-command \"id\")\n" nil
+                        (expand-file-name "risky.el" new-dir) nil 'silent)
+          (with-temp-buffer
+            (should (= 1 (package-upgrade-guard--generate-diff
+                          old-dir new-dir)))))
+      (delete-directory old-dir t)
+      (delete-directory new-dir t))))
+
+(ert-deftest package-upgrade-guard-security-diff-auto-approves-empty-review ()
+  "A successful security review with no matches should not prompt."
+  (let ((pkg-desc (package-upgrade-guard-test--desc 'pkg '(2 0)))
+        (package-upgrade-guard-diff-mode 'security)
+        prompted
+        displayed)
+    (cl-letf (((symbol-function
+                'package-upgrade-guard--find-installed-package-dir)
+               (lambda (_name) "/tmp/pkg-1.0"))
+              ((symbol-function
+                'package-upgrade-guard--download-package-safely)
+               (lambda (_desc) "/tmp/pkg-2.0"))
+              ((symbol-function 'package-upgrade-guard--get-version-from-dir)
+               (lambda (_dir) "1.0"))
+              ((symbol-function 'package-upgrade-guard--generate-diff)
+               (lambda (_old _new) 0))
+              ((symbol-function 'display-buffer)
+               (lambda (&rest _args) (setq displayed t)))
+              ((symbol-function 'package-upgrade-guard--ask-user-approval)
+               (lambda (&rest _args) (setq prompted t))))
+      (should (package-upgrade-guard--show-tarball-diff pkg-desc))
+      (should-not prompted)
+      (should-not displayed))))
+
+(ert-deftest package-upgrade-guard-security-diff-prompts-after-incomplete-review ()
+  "An incomplete security review must not be auto-approved."
+  (let ((pkg-desc (package-upgrade-guard-test--desc 'pkg '(2 0)))
+        (package-upgrade-guard-diff-mode 'security)
+        prompted)
+    (cl-letf (((symbol-function
+                'package-upgrade-guard--find-installed-package-dir)
+               (lambda (_name) "/tmp/pkg-1.0"))
+              ((symbol-function
+                'package-upgrade-guard--download-package-safely)
+               (lambda (_desc) "/tmp/pkg-2.0"))
+              ((symbol-function 'package-upgrade-guard--get-version-from-dir)
+               (lambda (_dir) "1.0"))
+              ((symbol-function 'package-upgrade-guard--generate-diff)
+               (lambda (_old _new) nil))
+              ((symbol-function 'display-buffer) #'ignore)
+              ((symbol-function 'package-upgrade-guard--ask-user-approval)
+               (lambda (&rest _args) (setq prompted t))))
+      (should (package-upgrade-guard--show-tarball-diff pkg-desc))
+      (should prompted))))
+
+(ert-deftest package-upgrade-guard-vc-security-diff-auto-approves-empty-review ()
+  "A VC security review with no matches should not prompt."
+  (let* ((pkg-dir (make-temp-file "package-guard-vc-" t))
+         (pkg-desc (package-upgrade-guard-test--desc 'pkg '(2 0) pkg-dir))
+         (package-upgrade-guard-diff-mode 'security)
+         prompted
+         displayed)
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" pkg-dir))
+          (cl-letf (((symbol-function
+                      'package-upgrade-guard--insert-git-command)
+                     (lambda (&rest _args) t))
+                    ((symbol-function 'package-upgrade-guard--git-upstream)
+                     (lambda (_dir) "origin/main"))
+                    ((symbol-function 'package-upgrade-guard--git-output)
+                     (lambda (&rest _args)
+                       "@@ -1 +1 @@\n-(message \"old\")\n+(message \"new\")"))
+                    ((symbol-function 'display-buffer)
+                     (lambda (&rest _args) (setq displayed t)))
+                    ((symbol-function
+                      'package-upgrade-guard--ask-user-approval)
+                     (lambda (&rest _args) (setq prompted t))))
+            (should (package-upgrade-guard--show-vc-diff pkg-desc))
+            (should-not prompted)
+            (should-not displayed)))
+      (delete-directory pkg-dir t))))
+
+(ert-deftest package-upgrade-guard-vc-auto-approves-after-manual-approval ()
+  "A manual VC approval must not disable later automatic approvals."
+  (let* ((pkg-dir (make-temp-file "package-guard-vc-sequence-" t))
+         (pkg-desc (package-upgrade-guard-test--desc 'pkg '(2 0) pkg-dir))
+         (package-upgrade-guard-diff-mode 'security)
+         (diff-content
+          "@@ -1 +1 @@\n-(message \"old\")\n+(shell-command \"id\")")
+         (prompt-count 0))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" pkg-dir))
+          (cl-letf (((symbol-function
+                      'package-upgrade-guard--insert-git-command)
+                     (lambda (&rest _args) t))
+                    ((symbol-function 'package-upgrade-guard--git-upstream)
+                     (lambda (_dir) "origin/main"))
+                    ((symbol-function 'package-upgrade-guard--git-output)
+                     (lambda (&rest _args) diff-content))
+                    ((symbol-function 'display-buffer) #'ignore)
+                    ((symbol-function
+                      'package-upgrade-guard--ask-user-approval)
+                     (lambda (&rest _args)
+                       (setq prompt-count (1+ prompt-count))
+                       (package-upgrade-guard--cleanup-diff-buffers)
+                       t)))
+            (should (package-upgrade-guard--show-vc-diff pkg-desc))
+            (setq diff-content
+                  "@@ -1 +1 @@\n-(message \"old\")\n+(message \"new\")")
+            (should (package-upgrade-guard--show-vc-diff pkg-desc))
+            (should (= 1 prompt-count))))
+      (delete-directory pkg-dir t))))
+
 (provide 'package-upgrade-guard-tests)
 
 ;;; package-upgrade-guard-tests.el ends here

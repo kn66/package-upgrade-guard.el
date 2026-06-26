@@ -132,7 +132,8 @@ Note: ~"melpa"~ and other third-party archives should generally not be excluded 
 ;; Custom base directory for temporary package review sessions
 (setopt package-upgrade-guard-temp-dir "/path/to/temp/dir")
 
-;; Show only security-sensitive diff hunks
+;; Show only security-sensitive diff hunks.  Upgrades with no matching
+;; hunks are approved automatically.
 (setopt package-upgrade-guard-diff-mode 'security)
 
 ;; Exclude trusted archives from diff checking (auto-approve)

@@ -91,24 +91,36 @@ it is non-nil.  Return non-nil on success."
             (old-version
              (package-upgrade-guard--get-version-from-dir old-dir))
             (new-version
-             (package-version-join (package-desc-version pkg-desc))))
+             (package-version-join (package-desc-version pkg-desc)))
+            matching-files)
         (with-current-buffer diff-buffer
-          (erase-buffer)
+          (let ((inhibit-read-only t))
+            (erase-buffer))
           (insert (format "Diff for package %s:\n" pkg-name))
           (insert
            (format "Old version: %s\n" (or old-version "unknown")))
           (insert (format "New version: %s\n\n" new-version))
 
           ;; Generate diff
-          (package-upgrade-guard--generate-diff old-dir temp-dir)
+          (setq matching-files
+                (package-upgrade-guard--generate-diff old-dir temp-dir))
 
           (diff-mode)
           (read-only-mode 1)
           (goto-char (point-min)))
 
-        (display-buffer diff-buffer)
-        (package-upgrade-guard--ask-user-approval
-         pkg-desc "upgrade package")))))
+        (if (and (package-upgrade-guard--security-diff-only-p)
+                 (numberp matching-files)
+                 (zerop matching-files))
+            (progn
+              (package-upgrade-guard--cleanup-diff-buffers)
+              (message
+               "Security check: auto-approved %s; no sensitive hunks found"
+               pkg-name)
+              t)
+          (display-buffer diff-buffer)
+          (package-upgrade-guard--ask-user-approval
+           pkg-desc "upgrade package"))))))
 
 (defun package-upgrade-guard--show-vc-diff (pkg-desc)
   "Show git diff for VC package PKG-DESC.
@@ -123,9 +135,12 @@ Returns t if user approves, nil if rejected."
     (unless (file-exists-p (expand-file-name ".git" pkg-dir))
       (error "Not a git repository: %s" pkg-dir))
 
-    (let ((diff-buffer (get-buffer-create "*Package VC Diff*")))
+    (let ((diff-buffer (get-buffer-create "*Package VC Diff*"))
+          (fetch-succeeded t)
+          (security-review-clear nil))
       (with-current-buffer diff-buffer
-        (erase-buffer)
+        (let ((inhibit-read-only t))
+          (erase-buffer))
         (insert (format "Git diff for VC package %s:\n" pkg-name))
         (insert (format "Repository: %s\n\n" pkg-dir))
 
@@ -140,9 +155,11 @@ Returns t if user approves, nil if rejected."
         ;; Fetch latest changes
         (insert "\n=== Fetching latest changes ===\n")
         (condition-case err
-            (package-upgrade-guard--insert-git-command
-             pkg-dir "Fetch completed" "fetch")
+            (unless (package-upgrade-guard--insert-git-command
+                     pkg-dir "Fetch completed" "fetch")
+              (setq fetch-succeeded nil))
           (error
+           (setq fetch-succeeded nil)
            (insert (format "Error fetching: %s\n" err))))
 
         (let ((upstream
@@ -174,9 +191,15 @@ Returns t if user approves, nil if rejected."
                             (and diff-content
                                  (package-upgrade-guard--filter-security-unified-diff
                                   diff-content))))
-                      (if (and filtered (not (string-empty-p filtered)))
-                          (insert filtered "\n")
-                        (insert "No security-sensitive hunks matched current patterns\n")))
+                      (cond
+                       ((null diff-content)
+                        (insert "Error getting diff\n"))
+                       ((not (string-empty-p filtered))
+                        (insert filtered "\n"))
+                       (t
+                        (insert "No security-sensitive hunks matched current patterns\n")
+                        (when fetch-succeeded
+                          (setq security-review-clear t)))))
                   (package-upgrade-guard--insert-git-command
                    pkg-dir "No changes in diff" "diff"
                    (format "HEAD..%s" upstream)))
@@ -188,9 +211,16 @@ Returns t if user approves, nil if rejected."
         (font-lock-ensure)
         (goto-char (point-min)))
 
-      (display-buffer diff-buffer)
-      (package-upgrade-guard--ask-user-approval
-       pkg-desc "upgrade VC package"))))
+      (if security-review-clear
+          (progn
+            (package-upgrade-guard--cleanup-diff-buffers)
+            (message
+             "Security check: auto-approved %s; no sensitive hunks found"
+             pkg-name)
+            t)
+        (display-buffer diff-buffer)
+        (package-upgrade-guard--ask-user-approval
+         pkg-desc "upgrade VC package")))))
 
 (defun package-upgrade-guard--show-package-contents (pkg-dir)
   "Show contents of package directory PKG-DIR."

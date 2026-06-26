@@ -58,7 +58,8 @@ package-upgrade-guard's review."
   "How much diff content to show during package review.
 When set to `all', show the normal package diff.  When set to
 `security', show only diff hunks that match
-`package-upgrade-guard-security-diff-regexp-list'."
+`package-upgrade-guard-security-diff-regexp-list'.  A successfully
+checked upgrade with no matching hunks is approved automatically."
   :type '(choice (const :tag "Show all diff content" all)
                  (const :tag "Show only security-sensitive hunks" security))
   :group 'package-upgrade-guard)
