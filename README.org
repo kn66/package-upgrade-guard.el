@@ -132,9 +132,12 @@ Note: ~"melpa"~ and other third-party archives should generally not be excluded 
 ;; Custom base directory for temporary package review sessions
 (setopt package-upgrade-guard-temp-dir "/path/to/temp/dir")
 
-;; Show only security-sensitive diff hunks.  Upgrades with no matching
-;; hunks are approved automatically.
+;; Show only security-sensitive diff hunks.
 (setopt package-upgrade-guard-diff-mode 'security)
+
+;; Independently control conservative automatic approval.  Only complete
+;; reviews containing documentation-only additions/modifications qualify.
+(setopt package-upgrade-guard-security-auto-approve t)
 
 ;; Exclude trusted archives from diff checking (auto-approve)
 (setopt package-upgrade-guard-excluded-archives '("gnu"))
@@ -150,6 +153,7 @@ The package provides several customization options through the ~package-upgrade-
 - ~package-upgrade-guard-enabled~ - Global enable/disable
 - ~package-upgrade-guard-temp-dir~ - Custom base directory for temporary review sessions
 - ~package-upgrade-guard-diff-mode~ - Show all diffs or only security-sensitive hunks
+- ~package-upgrade-guard-security-auto-approve~ - Auto-approve complete, documentation-only reviews with no sensitive matches
 - ~package-upgrade-guard-security-diff-regexp-list~ - Regexps used by security-only diff mode
 - ~package-upgrade-guard-excluded-archives~ - List of archive names to auto-approve
 - ~package-upgrade-guard-excluded-packages~ - List of package names to auto-approve
@@ -168,12 +172,13 @@ Package Upgrade Guard is designed for defensive security purposes:
 - Provides transparency into what code changes are being installed
 - Allows users to make informed decisions about package upgrades
 - Shows the reviewed changes before package modifications are applied
+- Requires manual approval for executable code, binary files, deletions, renames, dependency metadata, and unclassified changes
 
 * Limitations
 
 - Large packages may show truncated per-file diffs for performance
 - Binary files are not text-diffed (shown as modified with size changes)
-- Requires manual review for each package upgrade
+- Security-only matching is heuristic and cannot prove that arbitrary Emacs Lisp is safe
 - Temporary files are created during analysis
 
 * Troubleshooting

@@ -58,37 +58,62 @@ package-upgrade-guard's review."
   "How much diff content to show during package review.
 When set to `all', show the normal package diff.  When set to
 `security', show only diff hunks that match
-`package-upgrade-guard-security-diff-regexp-list'.  A successfully
-checked upgrade with no matching hunks is approved automatically."
+`package-upgrade-guard-security-diff-regexp-list'.  Automatic approval
+is controlled separately by
+`package-upgrade-guard-security-auto-approve'."
   :type '(choice (const :tag "Show all diff content" all)
                  (const :tag "Show only security-sensitive hunks" security))
+  :group 'package-upgrade-guard)
+
+(defcustom package-upgrade-guard-security-auto-approve t
+  "Automatically approve conservatively classified security reviews.
+This applies only in `security' diff mode.  A review is eligible only
+when it completed successfully, found no sensitive patterns, and all
+changes are additions or modifications to recognized documentation
+files.  Reviews with executable files, binary content, deletions,
+renames, dependency metadata, or other unclassified changes always
+require manual approval."
+  :type 'boolean
   :group 'package-upgrade-guard)
 
 (defcustom package-upgrade-guard-security-diff-regexp-list
   (list
    (rx symbol-start
-       (or "eval" "funcall" "apply" "load" "load-file" "load-library"
+       (or "eval" "eval-buffer" "eval-region" "eval-expression"
+           "funcall" "apply" "command-execute"
+           "load" "load-file" "load-library" "require" "autoload"
+           "module-load" "native-compile" "byte-compile-file"
            "read" "read-from-string" "intern" "fset" "defalias"
-           "advice-add" "add-function" "defadvice")
+           "advice-add" "add-function" "defadvice" "add-hook"
+           "remove-hook")
        symbol-end)
    (rx symbol-start
        (or "shell-command" "async-shell-command" "call-process"
-           "call-process-shell-command" "process-file" "start-process"
-           "start-file-process" "make-process")
+           "shell-command-to-string" "call-process-shell-command"
+           "process-file" "process-lines" "process-lines-ignore-status"
+           "start-process" "start-process-shell-command"
+           "start-file-process" "start-file-process-shell-command"
+           "make-process" "compile")
        symbol-end)
    (rx symbol-start
        (or "url-retrieve" "url-retrieve-synchronously" "url-copy-file"
-           "make-network-process" "open-network-stream")
+           "url-insert-file-contents" "make-network-process"
+           "open-network-stream" "network-stream-open-starttls"
+           "gnutls-negotiate" "browse-url")
        symbol-end)
    (rx symbol-start
-       (or "write-region" "delete-file" "delete-directory" "rename-file"
-           "copy-file" "set-file-modes")
+       (or "write-region" "append-to-file" "with-temp-file" "write-file"
+           "save-buffer" "delete-file" "delete-directory" "rename-file"
+           "copy-file" "make-directory" "make-symbolic-link"
+           "add-name-to-file" "set-file-modes" "set-file-times")
        symbol-end)
    (rx symbol-start
        (or "package-install" "package-vc-install" "package-refresh-contents"
            "straight-use-package" "quelpa")
        symbol-end)
-   (rx (or "http://" "https://" "curl " "wget ")))
+   (rx (or "http://" "https://" "curl " "wget "))
+   (rx (or ";;;###autoload" "Package-Requires:"
+           (seq "Local " "Variables:") "eval:")))
   "Regexps used by `package-upgrade-guard-diff-mode' value `security'.
 A diff hunk is shown when at least one added or removed line
 matches any regexp in this list."

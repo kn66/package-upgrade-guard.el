@@ -94,8 +94,9 @@ it is non-nil.  Return non-nil on success."
              (package-version-join (package-desc-version pkg-desc)))
             matching-files)
         (with-current-buffer diff-buffer
-          (let ((inhibit-read-only t))
-            (erase-buffer))
+          (when buffer-read-only
+            (read-only-mode -1))
+          (erase-buffer)
           (insert (format "Diff for package %s:\n" pkg-name))
           (insert
            (format "Old version: %s\n" (or old-version "unknown")))
@@ -109,9 +110,8 @@ it is non-nil.  Return non-nil on success."
           (read-only-mode 1)
           (goto-char (point-min)))
 
-        (if (and (package-upgrade-guard--security-diff-only-p)
-                 (numberp matching-files)
-                 (zerop matching-files))
+        (if (package-upgrade-guard--security-review-auto-approvable-p
+             matching-files)
             (progn
               (package-upgrade-guard--cleanup-diff-buffers)
               (message
@@ -139,8 +139,9 @@ Returns t if user approves, nil if rejected."
           (fetch-succeeded t)
           (security-review-clear nil))
       (with-current-buffer diff-buffer
-        (let ((inhibit-read-only t))
-          (erase-buffer))
+        (when buffer-read-only
+          (read-only-mode -1))
+        (erase-buffer)
         (insert (format "Git diff for VC package %s:\n" pkg-name))
         (insert (format "Repository: %s\n\n" pkg-dir))
 
@@ -184,22 +185,55 @@ Returns t if user approves, nil if rejected."
               (insert "Diff mode: security-sensitive hunks only\n"))
             (condition-case err
                 (if (package-upgrade-guard--security-diff-only-p)
-                    (let* ((diff-content
+                    (let* ((range (format "HEAD..%s" upstream))
+                           (diff-content
                             (package-upgrade-guard--git-output
-                             pkg-dir "diff" (format "HEAD..%s" upstream)))
+                             pkg-dir "diff" range))
+                           (name-status
+                            (package-upgrade-guard--git-output
+                             pkg-dir "diff" "--name-status" range))
+                           (numstat
+                            (package-upgrade-guard--git-output
+                             pkg-dir "diff" "--numstat" range))
+                           (classification
+                            (and name-status numstat
+                                 (package-upgrade-guard--classify-git-security-changes
+                                  name-status numstat)))
                            (filtered
                             (and diff-content
                                  (package-upgrade-guard--filter-security-unified-diff
-                                  diff-content))))
+                                  diff-content)))
+                           (review
+                            (list
+                             :matches
+                             (if (and filtered (not (string-empty-p filtered)))
+                                 1
+                               0)
+                             :complete
+                             (and diff-content name-status numstat)
+                             :auto-approve-safe
+                             (and classification
+                                  (plist-get classification :safe))
+                             :reasons
+                             (and classification
+                                  (plist-get classification :reasons)))))
                       (cond
-                       ((null diff-content)
-                        (insert "Error getting diff\n"))
+                       ((or (null diff-content)
+                            (null name-status)
+                            (null numstat))
+                        (insert "Error getting complete diff metadata\n"))
                        ((not (string-empty-p filtered))
                         (insert filtered "\n"))
                        (t
-                        (insert "No security-sensitive hunks matched current patterns\n")
-                        (when fetch-succeeded
-                          (setq security-review-clear t)))))
+                        (insert "No security-sensitive hunks matched current patterns\n")))
+                      (when-let ((reasons (plist-get review :reasons)))
+                        (insert "Manual approval required:\n")
+                        (dolist (reason reasons)
+                          (insert (format "  - %s\n" reason))))
+                      (when (and fetch-succeeded
+                                 (package-upgrade-guard--security-review-auto-approvable-p
+                                  review))
+                        (setq security-review-clear t)))
                   (package-upgrade-guard--insert-git-command
                    pkg-dir "No changes in diff" "diff"
                    (format "HEAD..%s" upstream)))

@@ -228,8 +228,10 @@ DIR is used as the descriptor's installed directory when non-nil."
           (write-region "(shell-command \"id\")\n" nil
                         (expand-file-name "risky.el" new-dir) nil 'silent)
           (with-temp-buffer
-            (should (= 1 (package-upgrade-guard--generate-diff
-                          old-dir new-dir)))))
+            (let ((review (package-upgrade-guard--generate-diff
+                           old-dir new-dir)))
+              (should (= 1 (plist-get review :matches)))
+              (should-not (plist-get review :auto-approve-safe)))))
       (delete-directory old-dir t)
       (delete-directory new-dir t))))
 
@@ -248,7 +250,8 @@ DIR is used as the descriptor's installed directory when non-nil."
               ((symbol-function 'package-upgrade-guard--get-version-from-dir)
                (lambda (_dir) "1.0"))
               ((symbol-function 'package-upgrade-guard--generate-diff)
-               (lambda (_old _new) 0))
+               (lambda (_old _new)
+                 '(:matches 0 :complete t :auto-approve-safe t)))
               ((symbol-function 'display-buffer)
                (lambda (&rest _args) (setq displayed t)))
               ((symbol-function 'package-upgrade-guard--ask-user-approval)
@@ -271,7 +274,8 @@ DIR is used as the descriptor's installed directory when non-nil."
               ((symbol-function 'package-upgrade-guard--get-version-from-dir)
                (lambda (_dir) "1.0"))
               ((symbol-function 'package-upgrade-guard--generate-diff)
-               (lambda (_old _new) nil))
+               (lambda (_old _new)
+                 '(:matches 0 :complete nil :auto-approve-safe t)))
               ((symbol-function 'display-buffer) #'ignore)
               ((symbol-function 'package-upgrade-guard--ask-user-approval)
                (lambda (&rest _args) (setq prompted t))))
@@ -294,8 +298,7 @@ DIR is used as the descriptor's installed directory when non-nil."
                     ((symbol-function 'package-upgrade-guard--git-upstream)
                      (lambda (_dir) "origin/main"))
                     ((symbol-function 'package-upgrade-guard--git-output)
-                     (lambda (&rest _args)
-                       "@@ -1 +1 @@\n-(message \"old\")\n+(message \"new\")"))
+                     (lambda (&rest _args) ""))
                     ((symbol-function 'display-buffer)
                      (lambda (&rest _args) (setq displayed t)))
                     ((symbol-function
@@ -323,7 +326,13 @@ DIR is used as the descriptor's installed directory when non-nil."
                     ((symbol-function 'package-upgrade-guard--git-upstream)
                      (lambda (_dir) "origin/main"))
                     ((symbol-function 'package-upgrade-guard--git-output)
-                     (lambda (&rest _args) diff-content))
+                     (lambda (_dir &rest args)
+                       (cond
+                        ((member "--name-status" args)
+                         (if (string-empty-p diff-content) "" "M\tpkg.el"))
+                        ((member "--numstat" args)
+                         (if (string-empty-p diff-content) "" "1\t1\tpkg.el"))
+                        (t diff-content))))
                     ((symbol-function 'display-buffer) #'ignore)
                     ((symbol-function
                       'package-upgrade-guard--ask-user-approval)
@@ -332,11 +341,118 @@ DIR is used as the descriptor's installed directory when non-nil."
                        (package-upgrade-guard--cleanup-diff-buffers)
                        t)))
             (should (package-upgrade-guard--show-vc-diff pkg-desc))
-            (setq diff-content
-                  "@@ -1 +1 @@\n-(message \"old\")\n+(message \"new\")")
+            (setq diff-content "")
             (should (package-upgrade-guard--show-vc-diff pkg-desc))
             (should (= 1 prompt-count))))
       (delete-directory pkg-dir t))))
+
+(ert-deftest package-upgrade-guard-security-review-allows-documentation-only ()
+  "Documentation-only text changes may be approved automatically."
+  (let ((old-dir (make-temp-file "package-guard-doc-old-" t))
+        (new-dir (make-temp-file "package-guard-doc-new-" t))
+        (package-upgrade-guard-diff-mode 'security)
+        (package-upgrade-guard-security-auto-approve t))
+    (unwind-protect
+        (progn
+          (write-region "Old documentation\n" nil
+                        (expand-file-name "README.md" old-dir) nil 'silent)
+          (write-region "New documentation\n" nil
+                        (expand-file-name "README.md" new-dir) nil 'silent)
+          (with-temp-buffer
+            (let ((review (package-upgrade-guard--generate-diff
+                           old-dir new-dir)))
+              (should (package-upgrade-guard--security-review-auto-approvable-p
+                       review)))))
+      (delete-directory old-dir t)
+      (delete-directory new-dir t))))
+
+(ert-deftest package-upgrade-guard-security-review-blocks-code-change ()
+  "Executable Lisp changes must require manual approval."
+  (let ((old-dir (make-temp-file "package-guard-code-old-" t))
+        (new-dir (make-temp-file "package-guard-code-new-" t))
+        (package-upgrade-guard-diff-mode 'security))
+    (unwind-protect
+        (progn
+          (write-region "(message \"old\")\n" nil
+                        (expand-file-name "pkg.el" old-dir) nil 'silent)
+          (write-region "(message \"new\")\n" nil
+                        (expand-file-name "pkg.el" new-dir) nil 'silent)
+          (with-temp-buffer
+            (let ((review (package-upgrade-guard--generate-diff
+                           old-dir new-dir)))
+              (should-not (plist-get review :auto-approve-safe))
+              (should-not
+               (package-upgrade-guard--security-review-auto-approvable-p
+                review)))))
+      (delete-directory old-dir t)
+      (delete-directory new-dir t))))
+
+(ert-deftest package-upgrade-guard-security-review-blocks-delete ()
+  "Deleted files must require manual approval."
+  (let ((old-dir (make-temp-file "package-guard-delete-old-" t))
+        (new-dir (make-temp-file "package-guard-delete-new-" t))
+        (package-upgrade-guard-diff-mode 'security))
+    (unwind-protect
+        (progn
+          (write-region "Documentation\n" nil
+                        (expand-file-name "README.md" old-dir) nil 'silent)
+          (with-temp-buffer
+            (let ((review (package-upgrade-guard--generate-diff
+                           old-dir new-dir)))
+              (should-not (plist-get review :auto-approve-safe))
+              (should (member "file deleted: README.md"
+                              (plist-get review :reasons))))))
+      (delete-directory old-dir t)
+      (delete-directory new-dir t))))
+
+(ert-deftest package-upgrade-guard-security-review-blocks-binary-change ()
+  "Binary changes must require manual approval."
+  (let ((old-dir (make-temp-file "package-guard-binary-old-" t))
+        (new-dir (make-temp-file "package-guard-binary-new-" t))
+        (package-upgrade-guard-diff-mode 'security))
+    (unwind-protect
+        (progn
+          (write-region (unibyte-string 0 1) nil
+                        (expand-file-name "payload.bin" old-dir) nil 'silent)
+          (write-region (unibyte-string 0 2) nil
+                        (expand-file-name "payload.bin" new-dir) nil 'silent)
+          (with-temp-buffer
+            (let ((review (package-upgrade-guard--generate-diff
+                           old-dir new-dir)))
+              (should-not (plist-get review :auto-approve-safe))
+              (should (member "binary file changed: payload.bin"
+                              (plist-get review :reasons))))))
+      (delete-directory old-dir t)
+      (delete-directory new-dir t))))
+
+(ert-deftest package-upgrade-guard-git-policy-blocks-binary-and-rename ()
+  "Git binary and rename changes must require manual approval."
+  (dolist (review
+           (list
+            (package-upgrade-guard--classify-git-security-changes
+             "M\timage.png" "-\t-\timage.png")
+            (package-upgrade-guard--classify-git-security-changes
+             "R100\tREADME.md\tMANUAL.md" "0\t0\tMANUAL.md")))
+    (should-not (plist-get review :safe))))
+
+(ert-deftest package-upgrade-guard-security-diff-detects-expanded-apis ()
+  "Security patterns should cover indirect execution and persistence APIs."
+  (dolist (line (list "+(shell-command-to-string command)"
+                      "+(process-lines \"git\" \"status\")"
+                      "+(module-load module-file)"
+                      "+(add-hook 'after-init-hook callback)"
+                      "+;;;###autoload"
+                      (concat "+;; Local "
+                              "Variables: eval: (do-dangerous-thing)")))
+    (should (package-upgrade-guard--security-diff-line-p line))))
+
+(ert-deftest package-upgrade-guard-security-auto-approve-can-be-disabled ()
+  "Automatic approval should be independently configurable."
+  (let ((package-upgrade-guard-diff-mode 'security)
+        (package-upgrade-guard-security-auto-approve nil))
+    (should-not
+     (package-upgrade-guard--security-review-auto-approvable-p
+      '(:matches 0 :complete t :auto-approve-safe t)))))
 
 (provide 'package-upgrade-guard-tests)
 
