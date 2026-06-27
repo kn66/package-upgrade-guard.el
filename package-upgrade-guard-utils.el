@@ -1,6 +1,6 @@
 ;;; package-upgrade-guard-utils.el --- Utility functions for package-upgrade-guard -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Free Software Foundation, Inc.
+;; Copyright (C) 2025 kn66
 
 ;; Author: Package Security Check
 ;; Keywords: convenience, packages, security

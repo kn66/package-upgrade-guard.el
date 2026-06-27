@@ -1,6 +1,6 @@
 ;;; package-upgrade-guard-diff.el --- Diff generation logic for package-upgrade-guard -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Free Software Foundation, Inc.
+;; Copyright (C) 2025 kn66
 
 ;; Author: Package Security Check
 ;; Keywords: convenience, packages, security
@@ -20,11 +20,14 @@
 (defvar package-upgrade-guard--security-review-complete t
   "Non-nil while the current security diff can be checked completely.")
 
-(defvar package-upgrade-guard--security-review-auto-approve-safe t
-  "Non-nil while the current review remains eligible for auto-approval.")
-
 (defvar package-upgrade-guard--security-review-reasons nil
   "Reasons the current security review requires manual approval.")
+
+(defvar package-upgrade-guard--security-file-sensitive nil
+  "Non-nil when the current file contains a configured sensitive pattern.")
+
+(defvar package-upgrade-guard--review-file-changed nil
+  "Non-nil when the current file differs between reviewed trees.")
 
 (defun package-upgrade-guard--file-read-error-p (content)
   "Return non-nil when CONTENT is an error from the safe file reader."
@@ -35,38 +38,34 @@
   (let* ((name (downcase (file-name-nondirectory file)))
          (extension (file-name-extension name)))
     (or (member extension '("md" "markdown" "org" "rst" "adoc" "txt"))
-        (string-match-p
-         (rx string-start
-             (or "readme" "license" "copying" "changelog" "changes"
-                 "news" "authors" "contributing" "code-of-conduct")
-             (or string-end "."))
-         name))))
+        (and (null extension)
+             (member name
+                     '("readme" "license" "copying" "changelog" "changes"
+                       "news" "authors" "contributing"
+                       "code-of-conduct"))))))
 
 (defun package-upgrade-guard--require-manual-review (reason)
   "Mark the current security review as manual because of REASON."
-  (setq package-upgrade-guard--security-review-auto-approve-safe nil)
   (cl-pushnew reason package-upgrade-guard--security-review-reasons
               :test #'equal))
 
-(defun package-upgrade-guard--security-review-result (matches)
-  "Return a security review result containing MATCHES and policy state."
+(defun package-upgrade-guard--security-review-result (matches changes)
+  "Return a review result for MATCHES.
+Argument CHANGES is the changed item count."
   (list :matches matches
+        :changes changes
         :complete package-upgrade-guard--security-review-complete
-        :auto-approve-safe
-        package-upgrade-guard--security-review-auto-approve-safe
         :reasons (nreverse package-upgrade-guard--security-review-reasons)))
 
-(defun package-upgrade-guard--security-review-auto-approvable-p (review)
-  "Return non-nil when security REVIEW may be approved automatically."
-  (and package-upgrade-guard-security-auto-approve
-       (package-upgrade-guard--security-diff-only-p)
+(defun package-upgrade-guard--review-no-changes-p (review)
+  "Return non-nil when REVIEW completed and found no differences."
+  (and review
        (plist-get review :complete)
-       (plist-get review :auto-approve-safe)
-       (zerop (or (plist-get review :matches) -1))))
+       (zerop (or (plist-get review :changes) -1))))
 
 (defun package-upgrade-guard--classify-git-security-changes
-    (name-status numstat)
-  "Classify git NAME-STATUS and NUMSTAT output for automatic approval."
+    (name-status numstat &optional diff-content)
+  "Classify git NAME-STATUS, NUMSTAT and DIFF-CONTENT for review diagnostics."
   (let ((safe t)
         reasons)
     (dolist (line (split-string name-status "\n" t))
@@ -98,6 +97,18 @@
                     (format "binary file changed: %s" (car (last fields)))
                   "unrecognized git size metadata")
                 reasons))))
+    (dolist (line (split-string (or diff-content "") "\n" t))
+      (cond
+       ((string-match-p (rx string-start (or "old mode " "new mode ")) line)
+        (setq safe nil)
+        (push "file mode changed" reasons))
+       ((string-match (rx string-start "new file mode "
+                          (group (+ digit)) string-end)
+                      line)
+        (let ((mode (match-string 1 line)))
+          (unless (string= mode "100644")
+            (setq safe nil)
+            (push (format "unsafe new file mode: %s" mode) reasons))))))
     (list :safe safe :reasons (delete-dups (nreverse reasons)))))
 
 (defun package-upgrade-guard--show-simple-diff
@@ -188,6 +199,24 @@
           (search-forward (string 0) nil t))
       (error nil))))
 
+(defun package-upgrade-guard--file-digest (file)
+  "Return a SHA-256 digest for FILE, or nil when it cannot be read."
+  (condition-case nil
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert-file-contents-literally file)
+        (secure-hash 'sha256 (current-buffer)))
+    (error nil)))
+
+(defun package-upgrade-guard--files-identical-p (old-file new-file)
+  "Return non-nil when OLD-FILE and NEW-FILE have identical bytes."
+  (let ((old-size (package-upgrade-guard--file-size old-file))
+        (new-size (package-upgrade-guard--file-size new-file)))
+    (and (= old-size new-size)
+         (let ((old-digest (package-upgrade-guard--file-digest old-file))
+               (new-digest (package-upgrade-guard--file-digest new-file)))
+           (and old-digest new-digest (equal old-digest new-digest))))))
+
 (defun package-upgrade-guard--insert-truncated-content
     (content max-size)
   "Insert CONTENT, truncating it to MAX-SIZE characters when needed."
@@ -198,36 +227,87 @@
      (format "\n... [truncated after %d characters] ...\n" max-size))))
 
 (defun package-upgrade-guard--security-diff-only-p ()
-  "Return non-nil when only security-sensitive diff content should be shown."
+  "Return non-nil when security annotations and policy validation are enabled."
   (eq package-upgrade-guard-diff-mode 'security))
 
+(defun package-upgrade-guard--security-regexp-match-p (content regexps)
+  "Return non-nil when CONTENT matches one of REGEXPS.
+Matching is case-insensitive so document directives and URL schemes cannot
+evade review through capitalization."
+  (let ((case-fold-search t)
+        (matched nil))
+    (dolist (regexp regexps matched)
+      (when (string-match-p regexp content)
+        (setq matched t)))))
+
+(defun package-upgrade-guard--security-content-p (content)
+  "Return non-nil when CONTENT has a configured sensitive pattern."
+  (package-upgrade-guard--security-regexp-match-p
+   content package-upgrade-guard-security-diff-regexp-list))
+
+(defun package-upgrade-guard--security-active-document-p (content)
+  "Return non-nil when CONTENT has an active document construct."
+  (package-upgrade-guard--security-regexp-match-p
+   content package-upgrade-guard-security-active-document-regexp-list))
+
 (defun package-upgrade-guard--security-diff-line-p (line)
-  "Return non-nil when unified diff LINE looks security-sensitive."
+  "Return non-nil when unified diff LINE is security-sensitive."
   (and (string-match-p "\\`[-+]" line)
        (not (string-prefix-p "+++" line))
        (not (string-prefix-p "---" line))
-       (let ((content (substring line 1))
-             (matched nil))
-         (dolist (regexp package-upgrade-guard-security-diff-regexp-list matched)
-           (when (string-match-p regexp content)
-             (setq matched t))))))
+       (package-upgrade-guard--security-content-p (substring line 1))))
+
+(defun package-upgrade-guard--security-diff-hunk-line-p (line)
+  "Return non-nil when changed or context diff LINE is security-sensitive."
+  (and (> (length line) 0)
+       (memq (aref line 0) '(?\s ?+ ?-))
+       (not (string-prefix-p "+++" line))
+       (not (string-prefix-p "---" line))
+       (package-upgrade-guard--security-content-p (substring line 1))))
+
+(defun package-upgrade-guard--security-diff-header-path (line)
+  "Return the changed path named by a unified diff +++ LINE."
+  (when (string-prefix-p "+++ " line)
+    (let* ((raw (car (split-string (substring line 4) "\t")))
+           (path
+            (if (and (> (length raw) 1)
+                     (string-prefix-p "\"" raw))
+                (condition-case nil
+                    (read raw)
+                  (error raw))
+              raw)))
+      (cond
+       ((string= path "/dev/null") nil)
+       ((string-prefix-p "b/" path) (substring path 2))
+       (t path)))))
 
 (defun package-upgrade-guard--filter-security-unified-diff (diff-content)
-  "Return only security-sensitive hunks from unified DIFF-CONTENT."
+  "Return sensitive portions of unified DIFF-CONTENT for analysis only.
+The returned text must not be used as the user-visible review diff because
+unmatched changes need to remain visible."
   (let ((lines (split-string diff-content "\n"))
         (file-header nil)
         (current-hunk nil)
         (current-hunk-matches nil)
+        ;; Malformed or headerless diffs are shown conservatively.
+        (current-file-full t)
         (result nil)
         (file-header-inserted nil))
     (cl-labels
         ((flush-hunk
           ()
-          (when (and current-hunk current-hunk-matches)
+          (when (and current-hunk
+                     (or current-file-full current-hunk-matches))
             (unless file-header-inserted
               (setq result (append result file-header))
               (setq file-header-inserted t))
-            (setq result (append result (nreverse current-hunk)))))
+            (setq result (append result (nreverse current-hunk))))
+          (when (and current-file-full
+                     (null current-hunk)
+                     file-header
+                     (not file-header-inserted))
+            (setq result (append result file-header))
+            (setq file-header-inserted t)))
          (reset-hunk
           (line)
           (flush-hunk)
@@ -239,7 +319,8 @@
           (setq file-header (list line))
           (setq file-header-inserted nil)
           (setq current-hunk nil)
-          (setq current-hunk-matches nil)))
+          (setq current-hunk-matches nil)
+          (setq current-file-full t)))
       (dolist (line lines)
         (cond
          ((string-prefix-p "diff --git " line)
@@ -247,17 +328,27 @@
          ((or (string-prefix-p "index " line)
               (string-prefix-p "new file mode " line)
               (string-prefix-p "deleted file mode " line)
+              (string-prefix-p "old mode " line)
+              (string-prefix-p "new mode " line)
               (string-prefix-p "similarity index " line)
               (string-prefix-p "rename from " line)
               (string-prefix-p "rename to " line)
               (string-prefix-p "--- " line)
               (string-prefix-p "+++ " line))
-          (setq file-header (append file-header (list line))))
+          (setq file-header (append file-header (list line)))
+          (when (string-prefix-p "+++ " line)
+            (let ((path
+                   (package-upgrade-guard--security-diff-header-path line)))
+              (setq current-file-full
+                    (or (null path)
+                        (not
+                         (package-upgrade-guard--security-documentation-file-p
+                          path)))))))
          ((string-prefix-p "@@ " line)
           (reset-hunk line))
          (current-hunk
           (push line current-hunk)
-          (when (package-upgrade-guard--security-diff-line-p line)
+          (when (package-upgrade-guard--security-diff-hunk-line-p line)
             (setq current-hunk-matches t)))))
       (flush-hunk))
     (if result
@@ -293,37 +384,39 @@
 
 (defun package-upgrade-guard--unified-file-diff-section
     (old-file new-file old-content new-content)
-  "Return a review section for modified OLD-FILE and NEW-FILE."
+  "Return review section for OLD-FILE and NEW-FILE.
+OLD-CONTENT and NEW-CONTENT are used as fallbacks when external diff output is
+unavailable."
   (condition-case err
       (let ((diff-result (diff-no-select old-file new-file nil 'noasync)))
         (unwind-protect
             (if (not diff-result)
                 (progn
-                  (when (package-upgrade-guard--security-diff-only-p)
-                    (setq package-upgrade-guard--security-review-complete nil))
+                  (setq package-upgrade-guard--security-review-complete nil)
                   nil)
               (let ((diff-content
                      (with-current-buffer diff-result
                        (buffer-string))))
-                (if (package-upgrade-guard--security-diff-only-p)
-                    (let ((filtered
+                (with-temp-buffer
+                  (when (> (length diff-content)
+                           package-upgrade-guard--max-unified-diff-size)
+                    (setq package-upgrade-guard--security-review-complete nil))
+                  (when (package-upgrade-guard--security-diff-only-p)
+                    (let ((sensitive
                            (package-upgrade-guard--filter-security-unified-diff
                             diff-content)))
-                      (unless (string-empty-p filtered)
-                        (concat
-                         "File modified - showing security-sensitive hunks:\n"
-                         filtered "\n")))
-                  (with-temp-buffer
-                    (insert "File modified - showing unified diff:\n")
-                    (package-upgrade-guard--insert-truncated-content
-                     diff-content
-                     package-upgrade-guard--max-unified-diff-size)
-                    (buffer-string)))))
+                      (unless (string-empty-p sensitive)
+                        (setq package-upgrade-guard--security-file-sensitive t)
+                         (insert "WARNING: sensitive patterns detected; complete diff follows.\n"))))
+                  (insert "File modified - showing unified diff:\n")
+                  (package-upgrade-guard--insert-truncated-content
+                   diff-content
+                   package-upgrade-guard--max-unified-diff-size)
+                  (buffer-string))))
           (when (buffer-live-p diff-result)
             (kill-buffer diff-result))))
     (error
-     (when (package-upgrade-guard--security-diff-only-p)
-       (setq package-upgrade-guard--security-review-complete nil))
+     (setq package-upgrade-guard--security-review-complete nil)
      (unless (package-upgrade-guard--security-diff-only-p)
        (with-temp-buffer
          (insert
@@ -335,37 +428,91 @@
 
 (defun package-upgrade-guard--new-file-diff-section (new-file rel-file)
   "Return a review section for NEW-FILE at REL-FILE."
+  (setq package-upgrade-guard--review-file-changed t)
   (let ((content
          (package-upgrade-guard--safe-read-file
-          new-file
-          (if (package-upgrade-guard--security-diff-only-p)
-              package-upgrade-guard--max-unified-diff-size
-            package-upgrade-guard--file-preview-size))))
+          new-file package-upgrade-guard--max-unified-diff-size))
+        (documentation-p
+         (package-upgrade-guard--security-documentation-file-p rel-file))
+        (binary-p (package-upgrade-guard--binary-file-p new-file))
+         (executable-p
+         (let ((mode (file-modes new-file)))
+           (and mode (not (zerop (logand mode #o111)))))))
+    (when (or (package-upgrade-guard--file-read-error-p content)
+              (> (package-upgrade-guard--file-size new-file)
+                 package-upgrade-guard--max-unified-diff-size))
+      (setq package-upgrade-guard--security-review-complete nil))
     (if (package-upgrade-guard--security-diff-only-p)
         (let ((matches
                (package-upgrade-guard--security-content-lines content "+")))
-          (unless (package-upgrade-guard--security-documentation-file-p
-                   rel-file)
+          (when matches
+            (setq package-upgrade-guard--security-file-sensitive t))
+          (unless documentation-p
             (package-upgrade-guard--require-manual-review
              (format "new non-documentation file: %s" rel-file)))
+          (when (and documentation-p
+                     (package-upgrade-guard--security-active-document-p
+                      content))
+            (package-upgrade-guard--require-manual-review
+             (format "active content in documentation: %s" rel-file)))
           (when (or (file-symlink-p new-file)
-                    (package-upgrade-guard--binary-file-p new-file))
+                    binary-p)
             (package-upgrade-guard--require-manual-review
              (format "new link or binary file: %s" rel-file)))
-          (when (or (package-upgrade-guard--file-read-error-p content)
-                    (> (package-upgrade-guard--file-size new-file)
-                       package-upgrade-guard--max-unified-diff-size))
-            (setq package-upgrade-guard--security-review-complete nil))
-          (when matches
-            (concat "New file added - showing security-sensitive lines:\n"
-                    matches)))
+          (when executable-p
+            (package-upgrade-guard--require-manual-review
+             (format "new executable file: %s" rel-file)))
+          (cond
+           (binary-p
+            (format "New binary file added (%d bytes); content skipped\n"
+                    (package-upgrade-guard--file-size new-file)))
+           (t
+            (with-temp-buffer
+              (when matches
+                (insert "WARNING: sensitive patterns detected; complete content follows.\n"))
+              (insert (if documentation-p
+                          "New documentation file added - showing content:\n"
+                        "New non-documentation file added - showing content:\n"))
+              (package-upgrade-guard--insert-truncated-content
+               content package-upgrade-guard--max-unified-diff-size)
+              (unless (string-suffix-p "\n" content)
+                (insert "\n"))
+              (buffer-string)))))
+      (if binary-p
+          (format "New binary file added (%d bytes); content skipped\n"
+                  (package-upgrade-guard--file-size new-file))
+        (with-temp-buffer
+          (insert "New file added - showing content:\n")
+          (package-upgrade-guard--insert-truncated-content
+           content package-upgrade-guard--max-unified-diff-size)
+          (unless (string-suffix-p "\n" content)
+            (insert "\n"))
+          (buffer-string))))))
+
+(defun package-upgrade-guard--deleted-file-diff-section (old-file rel-file)
+  "Return a conservative security review section for deleted REL-FILE.
+OLD-FILE is the path to the deleted file's previous content."
+  (setq package-upgrade-guard--review-file-changed t)
+  (package-upgrade-guard--require-manual-review
+   (format "file deleted: %s" rel-file))
+  (if (package-upgrade-guard--binary-file-p old-file)
+      (format "Binary file deleted (%d bytes); content skipped\n"
+              (package-upgrade-guard--file-size old-file))
+    (let ((content
+           (package-upgrade-guard--safe-read-file
+            old-file package-upgrade-guard--max-unified-diff-size)))
+      (when (package-upgrade-guard--security-content-p content)
+        (setq package-upgrade-guard--security-file-sensitive t))
+      (when (or (package-upgrade-guard--file-read-error-p content)
+                (> (package-upgrade-guard--file-size old-file)
+                   package-upgrade-guard--max-unified-diff-size))
+        (setq package-upgrade-guard--security-review-complete nil))
       (with-temp-buffer
-        (insert "New file added:\n")
-        (insert content)
-        (when (and (not (string-prefix-p "[Error" content))
-                   (> (nth 7 (file-attributes new-file))
-                      package-upgrade-guard--file-preview-size))
-          (insert "\n... [truncated] ..."))
+        (insert "File deleted - showing previous content:\n")
+        (package-upgrade-guard--insert-truncated-content
+         content package-upgrade-guard--max-unified-diff-size)
+        (unless (string-suffix-p "\n" content)
+          (insert "\n"))
         (buffer-string)))))
 
 (defun package-upgrade-guard--file-diff-section (rel-file old-dir new-dir)
@@ -377,38 +524,73 @@
       (if (equal (file-symlink-p old-file) (file-symlink-p new-file))
           (unless (package-upgrade-guard--security-diff-only-p)
             "No changes\n")
+        (setq package-upgrade-guard--review-file-changed t)
         (when (package-upgrade-guard--security-diff-only-p)
           (package-upgrade-guard--require-manual-review
            (format "symbolic link changed: %s" rel-file)))
-        (unless (package-upgrade-guard--security-diff-only-p)
-          "Symbolic link changed\n")))
+         (format "Symbolic link changed: %S -> %S\n"
+                 (file-symlink-p old-file) (file-symlink-p new-file))))
+     ((and (file-exists-p old-file)
+           (file-exists-p new-file)
+           (not (eq (file-directory-p old-file)
+                    (file-directory-p new-file))))
+      (setq package-upgrade-guard--review-file-changed t)
+      (when (package-upgrade-guard--security-diff-only-p)
+        (package-upgrade-guard--require-manual-review
+         (format "file type changed: %s" rel-file)))
+      (format "File type changed: %s -> %s\n"
+              (if (file-directory-p old-file) "directory" "file")
+              (if (file-directory-p new-file) "directory" "file")))
      ((and (file-exists-p old-file) (file-exists-p new-file))
       (cond
        ((file-directory-p old-file)
         (unless (package-upgrade-guard--security-diff-only-p)
           "Directory (skipped)\n"))
-       ((or (package-upgrade-guard--binary-file-p old-file)
-            (package-upgrade-guard--binary-file-p new-file))
-        (when (package-upgrade-guard--security-diff-only-p)
-          (package-upgrade-guard--require-manual-review
-           (format "binary file changed: %s" rel-file)))
-        (unless (package-upgrade-guard--security-diff-only-p)
-          (format
-           "Binary file modified (%d → %d bytes); textual diff skipped\n"
-           (package-upgrade-guard--file-size old-file)
-           (package-upgrade-guard--file-size new-file))))
+        ((or (package-upgrade-guard--binary-file-p old-file)
+             (package-upgrade-guard--binary-file-p new-file))
+         (if (and (equal (file-modes old-file) (file-modes new-file))
+                  (package-upgrade-guard--files-identical-p old-file new-file))
+             (unless (package-upgrade-guard--security-diff-only-p)
+               "No changes\n")
+           (setq package-upgrade-guard--review-file-changed t)
+           (when (package-upgrade-guard--security-diff-only-p)
+             (package-upgrade-guard--require-manual-review
+              (format "binary file changed: %s" rel-file)))
+           (format
+            "Binary file modified (%d → %d bytes); textual diff skipped\n"
+            (package-upgrade-guard--file-size old-file)
+            (package-upgrade-guard--file-size new-file))))
        (t
         (let ((old-content (package-upgrade-guard--safe-read-file old-file))
-              (new-content (package-upgrade-guard--safe-read-file new-file)))
+              (new-content (package-upgrade-guard--safe-read-file new-file))
+              (mode-changed
+               (not (equal (file-modes old-file) (file-modes new-file)))))
           (when (and (package-upgrade-guard--security-diff-only-p)
                      (or (package-upgrade-guard--file-read-error-p old-content)
                          (package-upgrade-guard--file-read-error-p new-content)))
             (setq package-upgrade-guard--security-review-complete nil))
-          (if (string= old-content new-content)
-              (unless (package-upgrade-guard--security-diff-only-p)
-                "No changes\n")
-            (progn
-              (when (and (package-upgrade-guard--security-diff-only-p)
+           (when (and (package-upgrade-guard--security-diff-only-p)
+                      mode-changed)
+            (package-upgrade-guard--require-manual-review
+             (format "file mode changed: %s" rel-file)))
+          (when (and (package-upgrade-guard--security-diff-only-p)
+                     (package-upgrade-guard--security-documentation-file-p
+                      rel-file)
+                     (package-upgrade-guard--security-active-document-p
+                      new-content))
+            (package-upgrade-guard--require-manual-review
+             (format "active content in documentation: %s" rel-file)))
+           (if (string= old-content new-content)
+               (cond
+                (mode-changed
+                 (setq package-upgrade-guard--review-file-changed t)
+                 (format "File mode changed: %o -> %o\n"
+                        (file-modes old-file) (file-modes new-file)))
+               ((not (package-upgrade-guard--security-diff-only-p))
+                "No changes\n"))
+             (progn
+               (setq package-upgrade-guard--review-file-changed t)
+               (when (and (package-upgrade-guard--security-diff-only-p)
                          (not
                           (package-upgrade-guard--security-documentation-file-p
                            rel-file)))
@@ -420,48 +602,60 @@
      ((file-exists-p new-file)
       (package-upgrade-guard--new-file-diff-section new-file rel-file))
      ((file-exists-p old-file)
-      (when (package-upgrade-guard--security-diff-only-p)
-        (package-upgrade-guard--require-manual-review
-         (format "file deleted: %s" rel-file)))
-      (unless (package-upgrade-guard--security-diff-only-p)
-        "File deleted\n")))))
+      (package-upgrade-guard--deleted-file-diff-section
+       old-file rel-file)))))
 
 (defun package-upgrade-guard--generate-diff (old-dir new-dir)
-  "Generate diff between OLD-DIR and NEW-DIR.
-In security diff mode, return a review result plist."
+  "Generate diff between OLD-DIR and NEW-DIR and return a review result plist."
   (insert
    (format "Comparing directories:\n  Old: %s\n  New: %s\n\n"
            old-dir
            new-dir))
   (when (package-upgrade-guard--security-diff-only-p)
-    (insert "Diff mode: security-sensitive hunks only\n\n"))
+    (insert
+     "Diff mode: complete available diffs with sensitive-pattern highlighting\n\n"))
   (let ((package-upgrade-guard--security-review-complete t)
-        (package-upgrade-guard--security-review-auto-approve-safe t)
         (package-upgrade-guard--security-review-reasons nil)
-        (file-set (make-hash-table :test 'equal))
-        (matched-files 0)
-        (skipped-files 0))
+         (file-set (make-hash-table :test 'equal))
+         (sensitive-files 0)
+         (changed-files 0)
+         (limit-reached nil))
     (dolist (file (when (file-exists-p old-dir)
                     (directory-files-recursively old-dir ".*")))
       (puthash (file-relative-name file old-dir) t file-set))
     (dolist (file (when (file-exists-p new-dir)
                     (directory-files-recursively new-dir ".*")))
       (puthash (file-relative-name file new-dir) t file-set))
+    (when (> (hash-table-count file-set)
+             package-upgrade-guard-max-review-files)
+      (error "Package review contains too many files: %d (limit %d)"
+             (hash-table-count file-set)
+             package-upgrade-guard-max-review-files))
     (dolist (rel-file (sort (hash-table-keys file-set) #'string<))
-      (let ((section
-             (package-upgrade-guard--file-diff-section
-              rel-file old-dir new-dir)))
-        (if section
-            (progn
-              (insert (format "\n=== %s ===\n%s" rel-file section))
-              (when (package-upgrade-guard--security-diff-only-p)
-                (setq matched-files (1+ matched-files))))
-          (when (package-upgrade-guard--security-diff-only-p)
-            (setq skipped-files (1+ skipped-files))))))
+      (unless limit-reached
+        (let* ((package-upgrade-guard--security-file-sensitive nil)
+               (package-upgrade-guard--review-file-changed nil)
+               (section
+                (package-upgrade-guard--file-diff-section
+                 rel-file old-dir new-dir)))
+          (if section
+              (insert (format "\n=== %s ===\n%s" rel-file section)))
+          (when (and (package-upgrade-guard--security-diff-only-p)
+                     package-upgrade-guard--security-file-sensitive)
+            (setq sensitive-files (1+ sensitive-files)))
+          (when package-upgrade-guard--review-file-changed
+            (setq changed-files (1+ changed-files)))
+          (when (> (buffer-size)
+                   package-upgrade-guard-max-total-diff-size)
+            (setq limit-reached t
+                  package-upgrade-guard--security-review-complete nil)
+            (package-upgrade-guard--require-manual-review
+             "total diff exceeds the display limit")
+            (insert "\nReview aborted: total diff exceeds the display limit.\n")))))
     (when (package-upgrade-guard--security-diff-only-p)
       (insert
-       (format "\nSecurity diff filter skipped %d file(s) with no matching hunks.\n"
-               skipped-files)))
+       (format "\nSensitive patterns detected in %d file(s); no changes were hidden.\n"
+               sensitive-files)))
     (when (and (package-upgrade-guard--security-diff-only-p)
                (not package-upgrade-guard--security-review-complete))
       (insert
@@ -471,8 +665,8 @@ In security diff mode, return a review result plist."
       (insert "Manual approval required:\n")
       (dolist (reason (reverse package-upgrade-guard--security-review-reasons))
         (insert (format "  - %s\n" reason))))
-    (when (package-upgrade-guard--security-diff-only-p)
-      (package-upgrade-guard--security-review-result matched-files))))
+    (package-upgrade-guard--security-review-result
+     sensitive-files changed-files)))
 
 (provide 'package-upgrade-guard-diff)
 

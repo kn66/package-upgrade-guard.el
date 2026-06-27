@@ -1,6 +1,6 @@
 ;;; package-upgrade-guard-tar.el --- TAR extraction logic for package-upgrade-guard -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Free Software Foundation, Inc.
+;; Copyright (C) 2025 kn66
 
 ;; Author: Package Security Check
 ;; Keywords: convenience, packages, security
@@ -49,6 +49,13 @@
     (package--with-response-buffer
       location
       :file file
+      (when (> (buffer-size) package-upgrade-guard-max-download-size)
+        (error "Package artifact exceeds review size limit: %s (%d bytes)"
+               pkg-full-name
+               (buffer-size)))
+      (puthash pkg-full-name
+               (secure-hash 'sha256 (current-buffer))
+               package-upgrade-guard--reviewed-artifact-digests)
       (pcase (package-desc-kind pkg-desc)
         ('tar
          (package-upgrade-guard--unpack-tar-response

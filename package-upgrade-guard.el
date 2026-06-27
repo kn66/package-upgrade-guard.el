@@ -1,6 +1,6 @@
 ;;; package-upgrade-guard.el --- Simple security checker for third-party packages -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2025 Free Software Foundation, Inc.
+;; Copyright (C) 2025 kn66
 
 ;; Author: Package Security Check
 ;; URL: https://github.com/kn66/package-upgrade-guard.el
@@ -19,12 +19,13 @@
 (require 'package)
 (require 'package-upgrade-guard-constants)
 (require 'package-upgrade-guard-utils)
-(require 'package-upgrade-guard-exclusions)
 (require 'package-upgrade-guard-tar)
 (require 'package-upgrade-guard-diff)
 (require 'package-upgrade-guard-ui)
 
 (defvar package-review-policy)
+
+(declare-function package-vc--unpack-1 "package-vc" (pkg-desc pkg-dir))
 
 ;;;###autoload
 (define-minor-mode package-upgrade-guard-mode
@@ -44,61 +45,186 @@
 
 (defun package-upgrade-guard--built-in-review-policy ()
   "Build a `package-review-policy' value from guard settings."
-  (if (not package-upgrade-guard-enabled)
-      nil
-    (let (selectors)
-      (dolist (archive package-upgrade-guard-excluded-archives)
-        (push (cons 'archive archive) selectors))
-      (dolist (package package-upgrade-guard-excluded-packages)
-        (push (cons 'package
-                    (package-upgrade-guard--coerce-package-name package))
-              selectors))
-      (if selectors
-          (cons 'not (nreverse selectors))
-        t))))
+  (and package-upgrade-guard-enabled t))
 
 (defun package-upgrade-guard--enable-built-in-review ()
   "Enable Emacs' built-in package review policy."
-  (setq package-upgrade-guard--saved-package-review-policy-bound
-        (boundp 'package-review-policy))
-  (setq package-upgrade-guard--saved-package-review-policy
-        (and package-upgrade-guard--saved-package-review-policy-bound
-             (symbol-value 'package-review-policy)))
+  (unless package-upgrade-guard--built-in-review-active
+    (setq package-upgrade-guard--saved-package-review-policy-bound
+          (boundp 'package-review-policy))
+    (setq package-upgrade-guard--saved-package-review-policy
+          (and package-upgrade-guard--saved-package-review-policy-bound
+               (symbol-value 'package-review-policy)))
+    (setq package-upgrade-guard--built-in-review-active t))
   (set 'package-review-policy
        (package-upgrade-guard--built-in-review-policy)))
 
 (defun package-upgrade-guard--restore-built-in-review ()
   "Restore the previous built-in package review policy."
-  (when (boundp 'package-review-policy)
-    (if package-upgrade-guard--saved-package-review-policy-bound
-        (set 'package-review-policy
-             package-upgrade-guard--saved-package-review-policy)
-      (makunbound 'package-review-policy)))
-  (setq package-upgrade-guard--saved-package-review-policy nil)
-  (setq package-upgrade-guard--saved-package-review-policy-bound nil))
+  (when package-upgrade-guard--built-in-review-active
+    (when (boundp 'package-review-policy)
+      (if package-upgrade-guard--saved-package-review-policy-bound
+          (set 'package-review-policy
+               package-upgrade-guard--saved-package-review-policy)
+        (makunbound 'package-review-policy)))
+    (setq package-upgrade-guard--saved-package-review-policy nil)
+    (setq package-upgrade-guard--saved-package-review-policy-bound nil)
+    (setq package-upgrade-guard--built-in-review-active nil)))
 
 (defun package-upgrade-guard--call-with-guard-disabled (function &rest args)
   "Call FUNCTION with ARGS while guard review is disabled."
   (let ((package-upgrade-guard-enabled nil))
     (apply function args)))
 
-(defun package-upgrade-guard--approve-excluded-package
-    (pkg-desc &optional action)
-  "Return t after logging the exclusion reason for PKG-DESC.
-When ACTION is non-nil, log an auto-approval message for ACTION."
-  (let ((reason (package-upgrade-guard--get-exclusion-reason pkg-desc)))
-    (if action
-        (message "Auto-approving %s: %s" action reason)
-      (message "Skipping security check: %s" reason)))
-  t)
+(defun package-upgrade-guard--call-with-reviewed-artifacts (function &rest args)
+  "Call FUNCTION with ARGS while enforcing reviewed artifact digests."
+  (let ((package-upgrade-guard-enabled nil)
+        (package-upgrade-guard--installing-reviewed-artifacts t))
+    (unwind-protect
+        (apply function args)
+      (clrhash package-upgrade-guard--reviewed-artifact-digests))))
+
+(defun package-upgrade-guard--call-with-reviewed-artifacts-allowing
+    (unreviewed function &rest args)
+  "Call FUNCTION with ARGS while allowing new packages in UNREVIEWED.
+All other artifacts must match a digest recorded during review."
+  (let ((package-upgrade-guard--allowed-unreviewed-artifacts
+         (append (mapcar #'package-desc-full-name unreviewed)
+                 package-upgrade-guard--allowed-unreviewed-artifacts)))
+    (apply #'package-upgrade-guard--call-with-reviewed-artifacts
+           function args)))
+
+(defun package-upgrade-guard--installed-artifacts (transaction)
+  "Return artifacts in TRANSACTION that modify installed packages."
+  (cl-remove-if-not
+   (lambda (pkg-desc)
+     (package-installed-p (package-desc-name pkg-desc)))
+   transaction))
+
+(defun package-upgrade-guard--new-artifacts (transaction)
+  "Return artifacts in TRANSACTION for packages not currently installed."
+  (cl-remove-if
+   (lambda (pkg-desc)
+     (package-installed-p (package-desc-name pkg-desc)))
+   transaction))
+
+(defun package-upgrade-guard--new-install-artifacts (packages)
+  "Return all new artifacts required to install PACKAGES."
+  (let (artifacts)
+    (dolist (pkg-desc packages (delete-dups artifacts))
+      (setq artifacts
+            (append
+             (package-upgrade-guard--new-artifacts
+              (package-upgrade-guard--install-transaction pkg-desc))
+             artifacts)))))
+
+(defun package-upgrade-guard--advice-package-unpack
+    (orig-fun pkg-desc)
+  "Verify PKG-DESC bytes before calling package unpack ORIG-FUN."
+  (when package-upgrade-guard--installing-reviewed-artifacts
+    (let* ((key (package-desc-full-name pkg-desc))
+           (expected
+            (gethash key package-upgrade-guard--reviewed-artifact-digests)))
+      (cond
+       (expected
+        (unless (equal expected (secure-hash 'sha256 (current-buffer)))
+          (error "Package artifact changed after review: %s" key))
+        (remhash key package-upgrade-guard--reviewed-artifact-digests))
+       ((member key package-upgrade-guard--allowed-unreviewed-artifacts))
+       (t
+        (error "Package artifact was not reviewed: %s" key)))))
+  (funcall orig-fun pkg-desc))
+
+(defun package-upgrade-guard--verify-reviewed-vc-commit (pkg-desc)
+  "Verify that PKG-DESC still points at the reviewed upstream commit."
+  (let* ((key (package-desc-full-name pkg-desc))
+         (expected (gethash key package-upgrade-guard--reviewed-vc-commits))
+         (directory (package-desc-dir pkg-desc))
+         (upstream (and directory
+                        (package-upgrade-guard--git-upstream directory)))
+         (actual (and upstream
+                      (package-upgrade-guard--git-output
+                       directory "rev-parse" upstream)))
+         (status (and directory
+                      (package-upgrade-guard--git-output
+                       directory "status" "--porcelain"))))
+    (unless expected
+      (error "VC package commit was not reviewed: %s" key))
+    (unless (and status (string-empty-p status))
+      (error "VC package working tree changed after review: %s" key))
+    (unless (equal expected actual)
+      (error "VC package upstream changed after review: %s" key))
+    t))
+
+(defun package-upgrade-guard--call-with-reviewed-vc-commit
+    (function pkg-desc &rest args)
+  "Install PKG-DESC at its reviewed commit without another network fetch.
+FUNCTION and ARGS identify the intercepted operation but are intentionally not
+called because it could fetch a different upstream revision."
+  (ignore function args)
+  (unwind-protect
+      (progn
+        (package-upgrade-guard--verify-reviewed-vc-commit pkg-desc)
+        (unless (fboundp 'package-vc--unpack-1)
+          (error "This Emacs cannot activate a pinned VC package"))
+        (let* ((key (package-desc-full-name pkg-desc))
+               (expected
+                (gethash key package-upgrade-guard--reviewed-vc-commits))
+               (directory (package-desc-dir pkg-desc))
+               (default-directory directory)
+               (original-head
+                (package-upgrade-guard--git-output
+                 directory "rev-parse" "HEAD")))
+          (unless original-head
+            (error "Could not determine current VC commit: %s" key))
+          (condition-case install-err
+              (progn
+                (let ((output
+                       (generate-new-buffer " *package-upgrade-guard-git*")))
+                  (unwind-protect
+                      (unless (zerop
+                               (call-process
+                                "git" nil output nil
+                                "merge" "--ff-only" expected))
+                        (error "Could not install reviewed VC commit %s: %s"
+                               expected
+                               (with-current-buffer output
+                                 (string-trim (buffer-string)))))
+                    (kill-buffer output)))
+                (unless (equal expected
+                               (package-upgrade-guard--git-output
+                                directory "rev-parse" "HEAD"))
+                  (error "VC package did not reach reviewed commit: %s" key))
+                (let ((package-upgrade-guard-enabled nil))
+                  (package-vc--unpack-1 pkg-desc directory)))
+            (error
+             (condition-case rollback-err
+                 (let ((output
+                        (generate-new-buffer
+                         " *package-upgrade-guard-git-rollback*")))
+                   (unwind-protect
+                       (unless (zerop
+                                (call-process
+                                 "git" nil output nil
+                                 "reset" "--hard" original-head))
+                         (message "Could not roll back VC package %s: %s"
+                                  key
+                                  (with-current-buffer output
+                                    (string-trim (buffer-string)))))
+                     (kill-buffer output)))
+               (error
+                (message "Could not roll back VC package %s: %s"
+                         key (error-message-string rollback-err))))
+             (signal (car install-err) (cdr install-err))))))
+    (remhash (package-desc-full-name pkg-desc)
+             package-upgrade-guard--reviewed-vc-commits)))
 
 (defun package-upgrade-guard--review-vc-package
     (pkg-desc &optional action)
   "Return non-nil if VC package PKG-DESC is approved.
-ACTION is used in the exclusion auto-approval message when non-nil."
-  (if (package-upgrade-guard--package-excluded-p pkg-desc)
-      (package-upgrade-guard--approve-excluded-package pkg-desc action)
-    (package-upgrade-guard--show-vc-diff pkg-desc)))
+ACTION describes the operation for callers and diagnostics."
+  (ignore action)
+  (package-upgrade-guard--show-vc-diff pkg-desc))
 
 (defun package-upgrade-guard--package-install-target (pkg)
   "Return the package descriptor or name that `package-install' will use for PKG."
@@ -132,20 +258,12 @@ ACTION is used in the exclusion auto-approval message when non-nil."
     (condition-case err
         (progn
           (message "Diff checking installation: %s" pkg-name)
-          (if (package-upgrade-guard--package-excluded-p pkg-desc)
-              (package-upgrade-guard--approve-excluded-package
-               pkg-desc "installation")
-            (package-upgrade-guard--show-tarball-diff pkg-desc)))
+          (package-upgrade-guard--show-tarball-diff pkg-desc))
       (error
        (message "Diff check failed for installation of %s: %s"
                 pkg-name
                 (error-message-string err))
-       (when
-           (y-or-n-p
-            (format
-             "Continue with installation of %s despite diff check failure? "
-             pkg-name))
-         t)))))
+       nil))))
 
 (defun package-upgrade-guard--review-install-transaction
     (transaction &optional reviewed)
@@ -201,6 +319,8 @@ package name."
     (advice-add
      'package-vc-upgrade
      :around #'package-upgrade-guard--advice-package-vc-upgrade))
+  (advice-add
+   'package-unpack :around #'package-upgrade-guard--advice-package-unpack)
   (message
    (if (package-upgrade-guard--built-in-review-available-p)
        "Package diff guard enabled using built-in package review"
@@ -222,6 +342,8 @@ package name."
     (advice-remove
      'package-vc-upgrade
      #'package-upgrade-guard--advice-package-vc-upgrade))
+  (advice-remove
+   'package-unpack #'package-upgrade-guard--advice-package-unpack)
   (package-upgrade-guard--restore-built-in-review)
   (package-upgrade-guard--cleanup-temp-dir)
   (package-upgrade-guard--cleanup-diff-buffers)
@@ -232,7 +354,9 @@ package name."
   (if (not package-upgrade-guard-enabled)
       (funcall orig-fun name)
     (let* ((package
-            (package-upgrade-guard--coerce-package-name name))
+             (package-upgrade-guard--coerce-package-name name))
+           (pkg-desc
+            (package-upgrade-guard--package-desc package 'installed))
            (approved nil))
 
       ;; Perform diff check for all packages
@@ -247,8 +371,12 @@ package name."
                   (message
                    "Diff check passed for %s. Proceeding with upgrade..."
                    package)
-                  (package-upgrade-guard--call-with-guard-disabled
-                   orig-fun name))
+                  (if (and pkg-desc
+                           (package-upgrade-guard--package-vc-p pkg-desc))
+                      (package-upgrade-guard--call-with-reviewed-vc-commit
+                       orig-fun pkg-desc name)
+                    (package-upgrade-guard--call-with-reviewed-artifacts
+                     orig-fun name)))
               (message
                "Diff check rejected for %s. Upgrade cancelled."
                package)))
@@ -257,13 +385,7 @@ package name."
          (message "Diff check failed for %s: %s"
                   package
                   (error-message-string err))
-         (when
-             (y-or-n-p
-              (format
-               "Continue with upgrade of %s despite diff check failure? "
-               package))
-           (package-upgrade-guard--call-with-guard-disabled
-            orig-fun name)))))))
+         nil)))))
 
 (defun package-upgrade-guard--advice-package-install
     (orig-fun pkg &optional dont-select)
@@ -271,22 +393,35 @@ package name."
 DONT-SELECT is passed through to ORIG-FUN."
   (if (not package-upgrade-guard-enabled)
       (funcall orig-fun pkg dont-select)
-    (let* ((name (if (package-desc-p pkg)
-                     (package-desc-name pkg)
-                   pkg))
-           (transaction
-            (package-upgrade-guard--install-transaction pkg)))
-      (if (package-upgrade-guard--review-install-transaction transaction)
-          (progn
-            (when transaction
-              (message
-               "Diff check passed for %s. Proceeding with installation..."
-               name))
-            (package-upgrade-guard--call-with-guard-disabled
-             orig-fun pkg dont-select))
-        (message
-         "Diff check rejected for %s. Installation cancelled."
-         name)))))
+    (let ((name (if (package-desc-p pkg)
+                    (package-desc-name pkg)
+                  pkg)))
+      (let* ((transaction
+              (package-upgrade-guard--install-transaction pkg))
+             (new-install-p (not (package-installed-p name)))
+             (review-transaction
+              (if new-install-p
+                  (package-upgrade-guard--installed-artifacts transaction)
+                transaction))
+             (unreviewed
+              (and new-install-p
+                   (package-upgrade-guard--new-artifacts transaction))))
+        (if (or (null review-transaction)
+                (package-upgrade-guard--review-install-transaction
+                 review-transaction))
+              (progn
+                (when review-transaction
+                  (message
+                   "Diff check passed for %s. Proceeding with installation..."
+                   name))
+                (if transaction
+                    (package-upgrade-guard--call-with-reviewed-artifacts-allowing
+                     unreviewed orig-fun pkg dont-select)
+                  (package-upgrade-guard--call-with-guard-disabled
+                   orig-fun pkg dont-select)))
+            (message
+             "Diff check rejected for %s. Installation cancelled."
+             name))))))
 
 (defun package-upgrade-guard--advice-package-upgrade-all
     (orig-fun &optional query)
@@ -395,12 +530,21 @@ REVIEWED caches package decisions across package transactions."
 
 (defun package-upgrade-guard--review-menu-packages
     (install-list upgrade-list)
-  "Return approved packages from INSTALL-LIST and UPGRADE-LIST.
+  "Return executable packages from INSTALL-LIST and UPGRADE-LIST.
+New packages in INSTALL-LIST do not require review.  Packages in
+UPGRADE-LIST, including dependencies introduced by them, are reviewed.
 The result is a cons cell (APPROVED-INSTALLS . APPROVED-UPGRADES)."
   (let ((reviewed (make-hash-table :test 'equal)))
     (cons
-     (package-upgrade-guard--review-menu-package-list
-      install-list reviewed)
+     (let (approved)
+       (dolist (pkg-desc install-list (nreverse approved))
+         (let ((modifications
+                (package-upgrade-guard--installed-artifacts
+                 (package-upgrade-guard--install-transaction pkg-desc))))
+           (when (or (null modifications)
+                     (package-upgrade-guard--review-install-transaction
+                      modifications reviewed))
+             (push pkg-desc approved)))))
      (package-upgrade-guard--review-menu-package-list
       upgrade-list reviewed))))
 
@@ -428,7 +572,7 @@ APPROVED-INSTALLS and APPROVED-UPGRADES are the approved packages."
          (+ (length approved-installs)
             (length approved-upgrades))))
     (when (> total-approved 0)
-      (message "Proceeding with %d approved package(s):"
+      (message "Proceeding with %d package operation(s):"
                total-approved)
       (when approved-installs
         (message "  Installing: %s"
@@ -455,11 +599,11 @@ APPROVED-INSTALLS and APPROVED-UPGRADES are the approved packages."
                     (package-upgrade-guard--menu-default-transaction)))
                  (install-list (car raw-transaction))
                  (delete-list (cdr raw-transaction)))
-            (if (not install-list)
-                (with-current-buffer menu-buffer
-                  (goto-char menu-point)
-                  (package-upgrade-guard--call-with-guard-disabled
-                   orig-fun noquery))
+             (if (not install-list)
+                 (with-current-buffer menu-buffer
+                   (goto-char menu-point)
+                   (package-upgrade-guard--call-with-guard-disabled
+                    orig-fun noquery))
               (let* ((partition
                       (package-upgrade-guard--partition-menu-transaction
                        install-list delete-list))
@@ -487,10 +631,12 @@ APPROVED-INSTALLS and APPROVED-UPGRADES are the approved packages."
 
                 (if (or approved-installs approved-upgrades pure-deletes)
                     ;; Proceed with execution; rejected installs/upgrades were unmarked.
-                    (with-current-buffer menu-buffer
-                      (goto-char menu-point)
-                      (package-upgrade-guard--call-with-guard-disabled
-                       orig-fun noquery))
+                     (with-current-buffer menu-buffer
+                       (goto-char menu-point)
+                       (package-upgrade-guard--call-with-reviewed-artifacts-allowing
+                        (package-upgrade-guard--new-install-artifacts
+                         approved-installs)
+                        orig-fun noquery))
                   (message "No approved package menu operations to execute")))))
         (set-marker menu-point nil)))))
 
@@ -552,11 +698,16 @@ APPROVED-INSTALLS and APPROVED-UPGRADES are approved packages."
 
 (defun package-upgrade-guard--upgrade-single-package (package-name)
   "Upgrade single package PACKAGE-NAME with diff check."
-  (when (package-upgrade-guard--review-package-upgrade package-name)
-    ;; Call package-upgrade directly without advice to avoid double prompting.
-    (package-upgrade-guard--call-with-guard-disabled
-     #'package-upgrade package-name)
-    t))
+  (let ((pkg-desc
+         (package-upgrade-guard--package-desc package-name 'installed)))
+    (when (package-upgrade-guard--review-package-upgrade package-name)
+      ;; Call package-upgrade directly without advice to avoid double prompting.
+      (if (and pkg-desc (package-upgrade-guard--package-vc-p pkg-desc))
+          (package-upgrade-guard--call-with-reviewed-vc-commit
+           #'package-upgrade pkg-desc package-name)
+        (package-upgrade-guard--call-with-reviewed-artifacts
+         #'package-upgrade package-name))
+      t)))
 
 (defun package-upgrade-guard--package-vc-upgrade-desc (pkg-name)
   "Return package descriptor for `package-vc-upgrade' argument PKG-NAME."
@@ -581,12 +732,7 @@ APPROVED-INSTALLS and APPROVED-UPGRADES are approved packages."
        (message "Diff check failed for VC package %s: %s"
                 package-name
                 (error-message-string err))
-       (when
-           (y-or-n-p
-            (format
-             "Continue with upgrade of %s despite diff check failure? "
-             package-name))
-         t)))))
+       nil))))
 
 (defun package-upgrade-guard--run-approved-package-vc-upgrade
     (orig-fun pkg-desc)
@@ -598,8 +744,8 @@ APPROVED-INSTALLS and APPROVED-UPGRADES are approved packages."
            "Diff check passed for VC package %s. Proceeding with upgrade..."
            package-name)
           ;; Call the original function with package-upgrade-guard disabled.
-          (package-upgrade-guard--call-with-guard-disabled
-           orig-fun pkg-desc))
+          (package-upgrade-guard--call-with-reviewed-vc-commit
+           orig-fun pkg-desc pkg-desc))
       (message
        "Diff check rejected for VC package %s. Upgrade cancelled."
        package-name))))

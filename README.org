@@ -1,6 +1,6 @@
 * Overview
 
-Package Upgrade Guard is an Emacs security tool that shows diffs for package upgrades and installations, helping users review changes before proceeding. It supports ELPA/MELPA packages and, on Emacs versions with ~package-vc~, git-based VC (version control) package upgrades.
+Package Upgrade Guard is an Emacs security tool for reviewing package modifications and detecting supply-chain changes introduced by upgrades. It supports ELPA/MELPA packages and, on Emacs versions with ~package-vc~, git-based VC (version control) package upgrades. Direct installation of a package that is not already installed proceeds without a review prompt.
 
 ⚠️ Note: Starting with Emacs 31, similar package-upgrade review functionality is available in upstream Emacs. This package is still useful for earlier Emacs versions (for example, Emacs 27.1-30).
 
@@ -9,11 +9,12 @@ Package Upgrade Guard is an Emacs security tool that shows diffs for package upg
 - 🔍 Shows diffs for package upgrades before installation
 - 📦 Supports both tarball packages (ELPA/MELPA) and VC packages (git repositories)
 - 🛡️ Security-focused review process with user approval prompts
-- 🔄 Works with ~package-install~, ~package-upgrade~, ~package-upgrade-all~, and package menu operations
-- 🔗 Reviews package dependencies before they are installed
+- 🔄 Reviews modifications initiated by ~package-install~, ~package-upgrade~, ~package-upgrade-all~, and package menu operations
+- 🔗 Reviews new dependencies introduced by package upgrades
 - 📊 Displays file-by-file changes, new files, and deleted files
+- 🔒 Verifies that installed archive bytes match the reviewed SHA-256 digest
+- 📌 Installs the exact reviewed VC commit without a second network fetch
 - ⚡ Efficient TAR extraction for package analysis
-- ⚙️ Archive exclusion for trusted sources (auto-approve without diff review)
 
 * Screenshots
 
@@ -35,10 +36,10 @@ Package Upgrade Guard is an Emacs security tool that shows diffs for package upg
 
 Once enabled, Package Upgrade Guard automatically intercepts:
 
-- ~M-x package-install~ - Shows package contents/diff before installing
+- ~M-x package-install~ - Reviews the diff when it modifies an installed package; new installations proceed directly
 - ~M-x package-upgrade~ - Shows diff before upgrading individual packages
 - ~M-x package-upgrade-all~ - Reviews each package individually
-- Package menu operations (mark packages with ~U~ or ~I~, then ~x~)
+- Package menu operations (upgrades marked with ~U~ are reviewed; new installs marked with ~I~ proceed directly)
 
 ** Interactive Workflow
 
@@ -62,64 +63,7 @@ For ELPA/MELPA packages, the tool shows:
 - New files added
 - Files removed
 - Version information
-- Dependency packages that will also be installed
-
-* Exclusion Configuration
-
-Package Upgrade Guard allows you to exclude trusted packages from diff checking in two ways: by archive or by specific package name. Excluded packages are automatically approved and upgraded without showing diffs.
-
-** Use Cases
-
-- *Development Archives*: Skip diff checking for development versions of GNU ELPA packages (~gnu-elpa-devel~)
-- *Trusted Sources*: Auto-approve packages from official archives you trust
-- *Trusted Packages*: Auto-approve specific packages you trust (e.g., ~magit~, ~org-mode~)
-- *Bulk Updates*: Reduce manual review for packages from specific sources or individual packages
-
-** Configuration Example
-
-#+BEGIN_SRC emacs-lisp
-  ;; check
-  (symbol-value 'package-archives) ; -> e.g. (("melpa" . "https://melpa.org/packages/") ("gnu" . "https://elpa.gnu.org/packages/") ("nongnu" . "https://elpa.nongnu.org/nongnu/"))
-
-  ;; Skip diff checking for GNU ELPA development packages
-  (setopt package-upgrade-guard-excluded-archives '("gnu"))
-
-  ;; Or exclude multiple archives
-  (setopt package-upgrade-guard-excluded-archives '("gnu" "nongnu"))
-
-  ;; Exclude specific trusted packages
-  (setopt package-upgrade-guard-excluded-packages '(magit org helm))
-
-  ;; Combine both approaches
-  (setopt package-upgrade-guard-excluded-archives '("gnu"))
-  (setopt package-upgrade-guard-excluded-packages '(some-trusted-melpa-package))
-#+END_SRC
-
-** Behavior
-
-When an excluded package is encountered (either by archive or package name):
-
-1. ✅ Diff checking is automatically skipped
-2. ✅ Package is auto-approved for installation/upgrade
-3. ✅ Clear message indicates the automatic approval and reason
-4. ✅ Manual review is still performed for non-excluded packages
-
-** Example Messages
-
-- ~Auto-approving installation: excluded package 'magit'~
-- ~Auto-approving upgrade: excluded archive 'gnu'~
-- ~Skipping security check: excluded package 'helm'~
-
-** Archive Name Reference
-
-Common archive names you might want to exclude:
-
-- ~"gnu"~ - GNU ELPA stable packages
-- ~"gnu-elpa-devel"~ - GNU ELPA development packages
-- ~"nongnu"~ - NonGNU ELPA stable packages
-- ~"nongnu-devel"~ - NonGNU ELPA development packages
-
-Note: ~"melpa"~ and other third-party archives should generally not be excluded for security reasons.
+- New dependency packages introduced by the upgrade
 
 * Configuration
 
@@ -132,18 +76,15 @@ Note: ~"melpa"~ and other third-party archives should generally not be excluded 
 ;; Custom base directory for temporary package review sessions
 (setopt package-upgrade-guard-temp-dir "/path/to/temp/dir")
 
-;; Show only security-sensitive diff hunks.
+;; Show the complete available diff and highlight configured sensitive
+;; patterns.  Unmatched changes remain visible; heuristic detection is used
+;; only to prioritize review.
 (setopt package-upgrade-guard-diff-mode 'security)
 
-;; Independently control conservative automatic approval.  Only complete
-;; reviews containing documentation-only additions/modifications qualify.
-(setopt package-upgrade-guard-security-auto-approve t)
-
-;; Exclude trusted archives from diff checking (auto-approve)
-(setopt package-upgrade-guard-excluded-archives '("gnu"))
-
-;; Exclude specific packages from diff checking (auto-approve)
-(setopt package-upgrade-guard-excluded-packages '(magit org helm))
+;; Reject unexpectedly large downloads or review trees.
+(setopt package-upgrade-guard-max-download-size (* 50 1024 1024))
+(setopt package-upgrade-guard-max-review-files 5000)
+(setopt package-upgrade-guard-max-total-diff-size (* 2 1024 1024))
 #+END_SRC
 
 ** Advanced Configuration
@@ -152,11 +93,16 @@ The package provides several customization options through the ~package-upgrade-
 
 - ~package-upgrade-guard-enabled~ - Global enable/disable
 - ~package-upgrade-guard-temp-dir~ - Custom base directory for temporary review sessions
-- ~package-upgrade-guard-diff-mode~ - Show all diffs or only security-sensitive hunks
-- ~package-upgrade-guard-security-auto-approve~ - Auto-approve complete, documentation-only reviews with no sensitive matches
+- ~package-upgrade-guard-diff-mode~ - Show normal diffs or highlight security-sensitive patterns in complete diffs
+- ~package-upgrade-guard-max-download-size~ - Maximum downloaded artifact size
+- ~package-upgrade-guard-max-review-files~ - Maximum number of files compared per review
+- ~package-upgrade-guard-max-total-diff-size~ - Maximum aggregate archive diff size
 - ~package-upgrade-guard-security-diff-regexp-list~ - Regexps used by security-only diff mode
-- ~package-upgrade-guard-excluded-archives~ - List of archive names to auto-approve
-- ~package-upgrade-guard-excluded-packages~ - List of package names to auto-approve
+
+Security highlighting is a review aid based on configurable heuristics, not a
+proof that unmatched content is safe.  It never hides unmatched changes.
+Every detected change requires manual approval.  A complete comparison with no
+differences proceeds without prompting.
 
 * Requirements
 
@@ -169,14 +115,15 @@ The package provides several customization options through the ~package-upgrade-
 Package Upgrade Guard is designed for defensive security purposes:
 
 - Helps identify potentially malicious changes in package updates
-- Provides transparency into what code changes are being installed
+- Provides transparency into modifications and upgrade-induced dependency changes
 - Allows users to make informed decisions about package upgrades
 - Shows the reviewed changes before package modifications are applied
-- Requires manual approval for executable code, binary files, deletions, renames, dependency metadata, and unclassified changes
+- Requires manual approval for every reviewed change; direct new installations are outside its review scope
+- Cancels installation when review, artifact verification, or VC validation fails
 
 * Limitations
 
-- Large packages may show truncated per-file diffs for performance
+- Oversized downloads, review trees, and diffs cancel review
 - Binary files are not text-diffed (shown as modified with size changes)
 - Security-only matching is heuristic and cannot prove that arbitrary Emacs Lisp is safe
 - Temporary files are created during analysis
@@ -213,7 +160,7 @@ MIT license
 
 * Version History
 
-- v1.3.0 - Added direct ~package-install~ and dependency review, safer package-menu upgrade rejection, VC upstream detection, binary-file diff handling, and ERT coverage
+- v1.3.0 - Added modification review through ~package-install~, upgrade dependency review, safer package-menu upgrade rejection, VC upstream detection, binary-file diff handling, and ERT coverage
 - v1.2.0 - Added package-name exclusion and package-vc-upgrade support
 - v1.1.0 - Added archive exclusion functionality for trusted sources
 - v1.0.0 - Initial release with tarball and VC package support
