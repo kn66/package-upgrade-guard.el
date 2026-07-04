@@ -627,6 +627,46 @@ DIR is used as the descriptor's installed directory when non-nil."
             (should-not displayed)))
       (delete-directory pkg-dir t))))
 
+(ert-deftest package-upgrade-guard-vc-untracked-generated-files-do-not-prompt ()
+  "Untracked package-vc artifacts must not make a no-change review prompt."
+  (let* ((pkg-dir (make-temp-file "package-guard-vc-untracked-" t))
+         (pkg-desc (package-upgrade-guard-test--desc 'pkg '(2 0) pkg-dir))
+         (package-upgrade-guard-diff-mode 'security)
+         prompted
+         displayed)
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" pkg-dir))
+          (cl-letf (((symbol-function
+                      'package-upgrade-guard--insert-git-command)
+                     (lambda (&rest _args) t))
+                    ((symbol-function 'package-upgrade-guard--git-upstream)
+                     (lambda (_dir) "origin/main"))
+                    ((symbol-function 'package-upgrade-guard--git-output)
+                     (lambda (_dir &rest args)
+                       (cond
+                        ((equal args
+                                '("status" "--porcelain"
+                                  "--untracked-files=no"))
+                         "")
+                        ((equal args '("status" "--porcelain"))
+                         "?? pkg-autoloads.el\n?? pkg-pkg.el\n?? pkg.elc")
+                        ((equal (car args) "rev-parse") "deadbeef")
+                        (t ""))))
+                    ((symbol-function
+                      'package-upgrade-guard--git-output-limited)
+                     (lambda (&rest _args)
+                       '(:output "" :truncated nil)))
+                    ((symbol-function 'display-buffer)
+                     (lambda (&rest _args) (setq displayed t)))
+                    ((symbol-function
+                      'package-upgrade-guard--ask-user-approval)
+                     (lambda (&rest _args) (setq prompted t))))
+            (should (package-upgrade-guard--show-vc-diff pkg-desc))
+            (should-not prompted)
+            (should-not displayed)))
+      (delete-directory pkg-dir t))))
+
 (ert-deftest package-upgrade-guard-git-output-limited-truncates ()
   "Bounded git output should retain only the configured amount."
   (skip-unless (executable-find "git"))
@@ -793,6 +833,32 @@ DIR is used as the descriptor's installed directory when non-nil."
                      (lambda (_dir &rest args)
                        (if (equal (car args) "status") "" "moved"))))
             (should-error
+             (package-upgrade-guard--verify-reviewed-vc-commit pkg-desc))))
+      (remhash key package-upgrade-guard--reviewed-vc-commits)
+      (delete-directory pkg-dir t))))
+
+(ert-deftest package-upgrade-guard-vc-verify-ignores-untracked-files ()
+  "Reviewed VC commits may still install with untracked generated artifacts."
+  (let* ((pkg-dir (make-temp-file "package-guard-vc-untracked-pin-" t))
+         (pkg-desc (package-upgrade-guard-test--desc 'pkg '(2 0) pkg-dir))
+         (key (package-desc-full-name pkg-desc)))
+    (unwind-protect
+        (progn
+          (puthash key "reviewed" package-upgrade-guard--reviewed-vc-commits)
+          (cl-letf (((symbol-function 'package-upgrade-guard--git-upstream)
+                     (lambda (_dir) "origin/main"))
+                    ((symbol-function 'package-upgrade-guard--git-output)
+                     (lambda (_dir &rest args)
+                       (cond
+                        ((equal args
+                                '("status" "--porcelain"
+                                  "--untracked-files=no"))
+                         "")
+                        ((equal args '("status" "--porcelain"))
+                         "?? pkg-autoloads.el\n?? pkg-pkg.el\n?? pkg.elc")
+                        ((equal (car args) "rev-parse") "reviewed")
+                        (t "")))))
+            (should
              (package-upgrade-guard--verify-reviewed-vc-commit pkg-desc))))
       (remhash key package-upgrade-guard--reviewed-vc-commits)
       (delete-directory pkg-dir t))))

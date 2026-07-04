@@ -146,8 +146,8 @@ All other artifacts must match a digest recorded during review."
                       (package-upgrade-guard--git-output
                        directory "rev-parse" upstream)))
          (status (and directory
-                      (package-upgrade-guard--git-output
-                       directory "status" "--porcelain"))))
+                      (package-upgrade-guard--git-tracked-status
+                       directory))))
     (unless expected
       (error "VC package commit was not reviewed: %s" key))
     (unless (and status (string-empty-p status))

@@ -55,6 +55,14 @@
       (when (equal 0 (apply #'call-process "git" nil t nil args))
         (string-trim (buffer-string))))))
 
+(defun package-upgrade-guard--git-tracked-status (directory)
+  "Return git status output for tracked changes in DIRECTORY.
+Untracked files are ignored because `package-vc' leaves generated
+package artifacts such as autoloads and byte-compiled files in the
+repository checkout."
+  (package-upgrade-guard--git-output
+   directory "status" "--porcelain" "--untracked-files=no"))
+
 (defun package-upgrade-guard--git-output-limited
     (directory limit &rest args)
   "Run git ARGS in DIRECTORY and return bounded output.
@@ -272,8 +280,7 @@ Returns t if user approves, nil if rejected."
         ;; Show current status
         (insert "=== Git Status ===\n")
         (let ((status
-               (package-upgrade-guard--git-output
-                pkg-dir "status" "--porcelain")))
+               (package-upgrade-guard--git-tracked-status pkg-dir)))
           (setq working-tree-clean
                 (and status (string-empty-p status)))
           (unless working-tree-clean
