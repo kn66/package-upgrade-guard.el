@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 kn66
 
 ;; Author: Package Security Check
-;; Keywords: convenience, packages, security
+;; Keywords: tools, convenience
 
 ;;; Commentary:
 
@@ -226,6 +226,10 @@ recognized documentation files when that content is locally available."
 (defvar package-upgrade-guard--reviewed-vc-commits
   (make-hash-table :test 'equal)
   "Commit IDs approved for VC package upgrades.")
+
+(defvar package-upgrade-guard--approved-incomplete-vc-reviews
+  (make-hash-table :test 'equal)
+  "Package full names approved after incomplete VC package reviews.")
 
 (provide 'package-upgrade-guard-constants)
 

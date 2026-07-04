@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 kn66
 
 ;; Author: Package Security Check
-;; Keywords: convenience, packages, security
+;; Keywords: tools, convenience
 
 ;;; Commentary:
 
@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'package)
+(require 'url)
 (require 'package-upgrade-guard-utils)
 
 (declare-function package-untar-buffer "package" (dir))
@@ -29,6 +30,31 @@
     (package-untar-buffer pkg-full-name)
     (expand-file-name pkg-full-name temp-dir)))
 
+(defun package-upgrade-guard--remote-content-length (location file)
+  "Return the remote Content-Length for FILE at LOCATION, or nil if unknown."
+  (when (and (stringp location)
+             (string-match-p "\\`https?://" location))
+    (let ((url-request-method "HEAD")
+          (url (concat (file-name-as-directory location) file))
+          buffer)
+      (condition-case nil
+          (progn
+            (setq buffer (url-retrieve-synchronously url t t 10))
+            (when buffer
+              (unwind-protect
+                  (with-current-buffer buffer
+                    (goto-char (point-min))
+                    (let ((case-fold-search t))
+                      (when (re-search-forward
+                             "^content-length:[ \t]*\\([0-9]+\\)" nil t)
+                        (string-to-number (match-string 1)))))
+                (when (and buffer (buffer-live-p buffer))
+                  (kill-buffer buffer)))))
+        (error
+         (when (and buffer (buffer-live-p buffer))
+           (kill-buffer buffer))
+         nil)))))
+
 (defun package-upgrade-guard--download-package-safely (pkg-desc)
   "Download package PKG-DESC to temporary directory without installing."
   (let* ((temp-dir (package-upgrade-guard--get-temp-dir))
@@ -40,6 +66,14 @@
           (concat
            (package-desc-full-name pkg-desc)
            (package-desc-suffix pkg-desc))))
+
+    (let ((content-length
+           (package-upgrade-guard--remote-content-length location file)))
+      (when (and content-length
+                 (> content-length package-upgrade-guard-max-download-size))
+        (error "Package artifact exceeds review size limit: %s (%d bytes)"
+               pkg-full-name
+               content-length)))
 
     ;; Clean up any existing temp directory
     (when (file-exists-p temp-pkg-dir)

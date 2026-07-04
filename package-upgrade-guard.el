@@ -5,8 +5,8 @@
 ;; Author: Package Security Check
 ;; URL: https://github.com/kn66/package-upgrade-guard.el
 ;; Version: 1.3.0
-;; Package-Requires: ((emacs "27.1"))
-;; Keywords: convenience, packages, security
+;; Package-Requires: ((emacs "30.2"))
+;; Keywords: tools, convenience
 
 ;;; Commentary:
 
@@ -156,68 +156,65 @@ All other artifacts must match a digest recorded during review."
       (error "VC package upstream changed after review: %s" key))
     t))
 
+(defun package-upgrade-guard--git-error-output (directory &rest args)
+  "Run git ARGS in DIRECTORY and return failure output, or nil on success."
+  (let ((default-directory directory)
+        (output (generate-new-buffer " *package-upgrade-guard-git*")))
+    (unwind-protect
+        (unless (zerop (apply #'call-process "git" nil output nil args))
+          (with-current-buffer output
+            (string-trim (buffer-string))))
+      (kill-buffer output))))
+
+(defun package-upgrade-guard--install-reviewed-vc-commit (pkg-desc)
+  "Install PKG-DESC at its reviewed commit without another network fetch."
+  (package-upgrade-guard--verify-reviewed-vc-commit pkg-desc)
+  (unless (fboundp 'package-vc--unpack-1)
+    (error "This Emacs cannot activate a pinned VC package"))
+  (let* ((key (package-desc-full-name pkg-desc))
+         (expected (gethash key package-upgrade-guard--reviewed-vc-commits))
+         (directory (package-desc-dir pkg-desc))
+         (original-head
+          (package-upgrade-guard--git-output directory "rev-parse" "HEAD")))
+    (unless original-head
+      (error "Could not determine current VC commit: %s" key))
+    (condition-case install-err
+        (progn
+          (when-let ((output
+                      (package-upgrade-guard--git-error-output
+                       directory "merge" "--ff-only" expected)))
+            (error "Could not install reviewed VC commit %s: %s"
+                   expected output))
+          (unless (equal expected
+                         (package-upgrade-guard--git-output
+                          directory "rev-parse" "HEAD"))
+            (error "VC package did not reach reviewed commit: %s" key))
+          (let ((package-upgrade-guard-enabled nil))
+            (package-vc--unpack-1 pkg-desc directory)))
+      (error
+       (condition-case rollback-err
+           (when-let ((output
+                       (package-upgrade-guard--git-error-output
+                        directory "reset" "--hard" original-head)))
+             (message "Could not roll back VC package %s: %s" key output))
+         (error
+          (message "Could not roll back VC package %s: %s"
+                   key (error-message-string rollback-err))))
+       (signal (car install-err) (cdr install-err))))))
+
 (defun package-upgrade-guard--call-with-reviewed-vc-commit
     (function pkg-desc &rest args)
-  "Install PKG-DESC at its reviewed commit without another network fetch.
-FUNCTION and ARGS identify the intercepted operation but are intentionally not
-called because it could fetch a different upstream revision."
-  (ignore function args)
-  (unwind-protect
-      (progn
-        (package-upgrade-guard--verify-reviewed-vc-commit pkg-desc)
-        (unless (fboundp 'package-vc--unpack-1)
-          (error "This Emacs cannot activate a pinned VC package"))
-        (let* ((key (package-desc-full-name pkg-desc))
-               (expected
-                (gethash key package-upgrade-guard--reviewed-vc-commits))
-               (directory (package-desc-dir pkg-desc))
-               (default-directory directory)
-               (original-head
-                (package-upgrade-guard--git-output
-                 directory "rev-parse" "HEAD")))
-          (unless original-head
-            (error "Could not determine current VC commit: %s" key))
-          (condition-case install-err
-              (progn
-                (let ((output
-                       (generate-new-buffer " *package-upgrade-guard-git*")))
-                  (unwind-protect
-                      (unless (zerop
-                               (call-process
-                                "git" nil output nil
-                                "merge" "--ff-only" expected))
-                        (error "Could not install reviewed VC commit %s: %s"
-                               expected
-                               (with-current-buffer output
-                                 (string-trim (buffer-string)))))
-                    (kill-buffer output)))
-                (unless (equal expected
-                               (package-upgrade-guard--git-output
-                                directory "rev-parse" "HEAD"))
-                  (error "VC package did not reach reviewed commit: %s" key))
-                (let ((package-upgrade-guard-enabled nil))
-                  (package-vc--unpack-1 pkg-desc directory)))
-            (error
-             (condition-case rollback-err
-                 (let ((output
-                        (generate-new-buffer
-                         " *package-upgrade-guard-git-rollback*")))
-                   (unwind-protect
-                       (unless (zerop
-                                (call-process
-                                 "git" nil output nil
-                                 "reset" "--hard" original-head))
-                         (message "Could not roll back VC package %s: %s"
-                                  key
-                                  (with-current-buffer output
-                                    (string-trim (buffer-string)))))
-                     (kill-buffer output)))
-               (error
-                (message "Could not roll back VC package %s: %s"
-                         key (error-message-string rollback-err))))
-             (signal (car install-err) (cdr install-err))))))
-    (remhash (package-desc-full-name pkg-desc)
-             package-upgrade-guard--reviewed-vc-commits)))
+  "Run an approved VC upgrade for PKG-DESC.
+Complete reviews install the exact reviewed commit without another fetch.
+Incomplete approvals fall back to FUNCTION and ARGS with the guard disabled."
+  (let ((key (package-desc-full-name pkg-desc)))
+    (unwind-protect
+        (if (gethash key package-upgrade-guard--approved-incomplete-vc-reviews)
+            (let ((package-upgrade-guard-enabled nil))
+              (apply function args))
+          (package-upgrade-guard--install-reviewed-vc-commit pkg-desc))
+      (remhash key package-upgrade-guard--reviewed-vc-commits)
+      (remhash key package-upgrade-guard--approved-incomplete-vc-reviews))))
 
 (defun package-upgrade-guard--review-vc-package
     (pkg-desc &optional action)

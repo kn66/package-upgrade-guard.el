@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 kn66
 
 ;; Author: Package Security Check
-;; Keywords: convenience, packages, security
+;; Keywords: tools, convenience
 
 ;;; Commentary:
 
@@ -54,6 +54,68 @@
     (with-temp-buffer
       (when (equal 0 (apply #'call-process "git" nil t nil args))
         (string-trim (buffer-string))))))
+
+(defun package-upgrade-guard--git-output-limited
+    (directory limit &rest args)
+  "Run git ARGS in DIRECTORY and return bounded output.
+LIMIT is the maximum number of characters retained from stdout.  On
+success, return a plist with `:output' and `:truncated'.  Return nil
+when git exits unsuccessfully."
+  (let ((default-directory (file-name-as-directory directory))
+        (buffer (generate-new-buffer " *package-upgrade-guard-git-output*"))
+        (stderr (generate-new-buffer " *package-upgrade-guard-git-error*"))
+        (stored 0)
+        truncated
+        process
+        status)
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq default-directory (file-name-as-directory directory))
+            (setq process
+                  (make-process
+                   :name "package-upgrade-guard-git"
+                   :buffer nil
+                   :command (cons "git" args)
+                   :connection-type 'pipe
+                   :noquery t
+                   :stderr stderr
+                   :filter
+                   (lambda (_process string)
+                     (let ((length (length string)))
+                       (with-current-buffer buffer
+                         (let ((remaining (- limit stored)))
+                           (if (> remaining 0)
+                               (let ((take (min remaining length)))
+                                 (insert (substring string 0 take))
+                                 (setq stored (+ stored take))
+                                 (when (< take length)
+                                   (setq truncated t)))
+                             (setq truncated t)))))))))
+          (while (memq (process-status process) '(run open))
+            (accept-process-output process 0.1))
+          (accept-process-output process 0.1)
+          (setq status (process-exit-status process))
+          (when (equal status 0)
+            (with-current-buffer buffer
+              (list :output (string-trim (buffer-string))
+                    :truncated truncated))))
+      (when (and process (process-live-p process))
+        (delete-process process))
+      (kill-buffer buffer)
+      (kill-buffer stderr))))
+
+(defun package-upgrade-guard--insert-vc-diff-content
+    (diff-content truncated)
+  "Insert DIFF-CONTENT and note when it was TRUNCATED during capture."
+  (package-upgrade-guard--insert-truncated-content
+   diff-content package-upgrade-guard--max-unified-diff-size)
+  (when (and truncated
+             (<= (length diff-content)
+                 package-upgrade-guard--max-unified-diff-size))
+    (insert
+     (format "\n... [truncated after %d characters] ...\n"
+             package-upgrade-guard--max-unified-diff-size))))
 
 (defun package-upgrade-guard--git-upstream (directory)
   "Return the upstream revision for DIRECTORY, or nil if none is set."
@@ -171,9 +233,8 @@ it is non-nil.  Return non-nil on success."
           t)
          ((not (plist-get review :complete))
           (display-buffer diff-buffer)
-          (message "Package review incomplete for %s; operation cancelled"
-                   pkg-name)
-          nil)
+          (package-upgrade-guard--ask-user-approval
+           pkg-desc (format "%s despite an incomplete review" action)))
          (t
           (display-buffer diff-buffer)
           (package-upgrade-guard--ask-user-approval
@@ -186,6 +247,7 @@ it is non-nil.  Return non-nil on success."
 Returns t if user approves, nil if rejected."
   (let* ((pkg-dir (package-desc-dir pkg-desc))
          (pkg-name (package-desc-name pkg-desc))
+         (key (package-desc-full-name pkg-desc))
          (default-directory pkg-dir))
 
     (unless (and pkg-dir (file-directory-p pkg-dir))
@@ -268,9 +330,14 @@ Returns t if user approves, nil if rejected."
             (condition-case err
                 (if (package-upgrade-guard--security-diff-only-p)
                     (let* ((range (format "HEAD..%s" upstream))
-                           (diff-content
-                            (package-upgrade-guard--git-output
-                             pkg-dir "diff" range))
+                           (diff-result
+                            (package-upgrade-guard--git-output-limited
+                             pkg-dir
+                             package-upgrade-guard--max-unified-diff-size
+                             "diff" range))
+                           (diff-content (plist-get diff-result :output))
+                           (diff-truncated
+                            (plist-get diff-result :truncated))
                            (name-status
                             (package-upgrade-guard--git-output
                              pkg-dir "diff" "--name-status" range))
@@ -302,9 +369,10 @@ Returns t if user approves, nil if rejected."
                               (max
                                (length
                                 (split-string (or name-status "") "\n" t))
-                               (if (string-empty-p (or diff-content "")) 0 1))
+                              (if (string-empty-p (or diff-content "")) 0 1))
                               :complete
                              (and diff-content name-status numstat
+                                  (not diff-truncated)
                                   (plist-get active-document-review :complete))
                               :reasons
                              (append
@@ -322,14 +390,14 @@ Returns t if user approves, nil if rejected."
                                     (not (string-empty-p sensitive-hunks)))
                            (insert
                             "WARNING: sensitive patterns detected; complete diff follows.\n"))
-                         (when (> (length diff-content)
-                                  package-upgrade-guard--max-unified-diff-size)
+                         (when (or diff-truncated
+                                   (> (length diff-content)
+                                      package-upgrade-guard--max-unified-diff-size))
                            (setq review-complete nil)
                            (insert
                             "Review aborted: VC diff exceeds the display limit.\n"))
-                         (package-upgrade-guard--insert-truncated-content
-                          diff-content
-                          package-upgrade-guard--max-unified-diff-size)
+                         (package-upgrade-guard--insert-vc-diff-content
+                          diff-content diff-truncated)
                          (insert "\n")))
                       (when-let ((reasons (plist-get review :reasons)))
                         (insert "Manual approval required:\n")
@@ -342,9 +410,14 @@ Returns t if user approves, nil if rejected."
                                  (package-upgrade-guard--review-no-changes-p
                                   review))
                         (setq review-no-changes t)))
-                  (let ((diff-content
-                         (package-upgrade-guard--git-output
-                          pkg-dir "diff" (format "HEAD..%s" upstream))))
+                  (let* ((diff-result
+                          (package-upgrade-guard--git-output-limited
+                           pkg-dir
+                           package-upgrade-guard--max-unified-diff-size
+                           "diff" (format "HEAD..%s" upstream)))
+                         (diff-content (plist-get diff-result :output))
+                         (diff-truncated
+                          (plist-get diff-result :truncated)))
                     (cond
                      ((null diff-content)
                       (setq review-complete nil)
@@ -354,13 +427,14 @@ Returns t if user approves, nil if rejected."
                       (when fetch-succeeded
                         (setq review-no-changes t)))
                      (t
-                      (when (> (length diff-content)
-                               package-upgrade-guard--max-unified-diff-size)
+                      (when (or diff-truncated
+                                (> (length diff-content)
+                                   package-upgrade-guard--max-unified-diff-size))
                         (setq review-complete nil)
                         (insert
                          "Review aborted: VC diff exceeds the display limit.\n"))
-                      (package-upgrade-guard--insert-truncated-content
-                       diff-content package-upgrade-guard--max-unified-diff-size)
+                      (package-upgrade-guard--insert-vc-diff-content
+                       diff-content diff-truncated)
                       (insert "\n")))))
               (error
                (setq review-complete nil)
@@ -376,8 +450,8 @@ Returns t if user approves, nil if rejected."
              (cond
               ((not review-complete)
                (display-buffer diff-buffer)
-               (message "VC review incomplete for %s; upgrade cancelled" pkg-name)
-               nil)
+               (package-upgrade-guard--ask-user-approval
+                pkg-desc "upgrade VC package despite an incomplete review"))
               (review-no-changes
                (package-upgrade-guard--cleanup-diff-buffers)
                (message
@@ -389,9 +463,15 @@ Returns t if user approves, nil if rejected."
                (package-upgrade-guard--ask-user-approval
                 pkg-desc "upgrade VC package")))))
         (when approved
-          (puthash (package-desc-full-name pkg-desc)
-                   reviewed-commit
-                   package-upgrade-guard--reviewed-vc-commits))
+          (if (and fetch-succeeded working-tree-clean reviewed-commit)
+              (progn
+                (puthash key reviewed-commit
+                         package-upgrade-guard--reviewed-vc-commits)
+                (remhash key
+                         package-upgrade-guard--approved-incomplete-vc-reviews))
+            (puthash key t
+                     package-upgrade-guard--approved-incomplete-vc-reviews)
+            (remhash key package-upgrade-guard--reviewed-vc-commits)))
         approved))))
 
 (defun package-upgrade-guard--ask-user-approval (pkg-desc action)

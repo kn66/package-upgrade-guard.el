@@ -3,7 +3,7 @@
 ;; Copyright (C) 2025 kn66
 
 ;; Author: Package Security Check
-;; Keywords: convenience, packages, security
+;; Keywords: tools, convenience
 
 ;;; Commentary:
 
@@ -94,8 +94,8 @@ SOURCE should be `installed' or `archive'."
 
 (defun package-upgrade-guard--package-vc-p (pkg-desc)
   "Return non-nil when PKG-DESC describes a VC package.
-Older supported Emacs versions do not provide `package-vc-p', so
-guard callers must use this compatibility wrapper."
+Guard callers use this wrapper so builds without `package-vc-p'
+are handled consistently."
   (and (fboundp 'package-vc-p)
        (package-vc-p pkg-desc)))
 

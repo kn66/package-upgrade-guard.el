@@ -2,7 +2,7 @@
 
 Package Upgrade Guard is an Emacs security tool for reviewing package modifications and detecting supply-chain changes introduced by upgrades. It supports ELPA/MELPA packages and, on Emacs versions with ~package-vc~, git-based VC (version control) package upgrades. Direct installation of a package that is not already installed proceeds without a review prompt.
 
-⚠️ Note: Starting with Emacs 31, similar package-upgrade review functionality is available in upstream Emacs. This package is still useful for earlier Emacs versions (for example, Emacs 27.1-30).
+⚠️ Note: Starting with Emacs 31, similar package-upgrade review functionality is available in upstream Emacs. This package currently declares tested support for Emacs 30.2 or later; older Emacs support is not claimed until it is covered by CI or manual verification.
 
 * Features
 
@@ -22,8 +22,9 @@ Package Upgrade Guard is an Emacs security tool for reviewing package modificati
 
 * Installation
 
-1. Place ~package-upgrade-guard.el~ in your Emacs load path
-2. Add to your Emacs configuration:
+1. Clone this repository, or install it with ~use-package~'s ~:vc~ support.
+2. If installing manually, add the repository directory to your load path.  Copying only ~package-upgrade-guard.el~ is not sufficient because the package is split across companion ~package-upgrade-guard-*.el~ files.
+3. Add to your Emacs configuration:
 
 #+BEGIN_SRC emacs-lisp
   (use-package package-upgrade-guard
@@ -81,10 +82,13 @@ For ELPA/MELPA packages, the tool shows:
 ;; only to prioritize review.
 (setopt package-upgrade-guard-diff-mode 'security)
 
-;; Reject unexpectedly large downloads or review trees.
+;; Reject unexpectedly large downloads and flag oversized reviews as incomplete.
 (setopt package-upgrade-guard-max-download-size (* 50 1024 1024))
 (setopt package-upgrade-guard-max-review-files 5000)
 (setopt package-upgrade-guard-max-total-diff-size (* 2 1024 1024))
+
+;; Use Emacs' built-in archive package review support when available.
+(setopt package-upgrade-guard-prefer-built-in-review t)
 #+END_SRC
 
 ** Advanced Configuration
@@ -95,18 +99,21 @@ The package provides several customization options through the ~package-upgrade-
 - ~package-upgrade-guard-temp-dir~ - Custom base directory for temporary review sessions
 - ~package-upgrade-guard-diff-mode~ - Show normal diffs or highlight security-sensitive patterns in complete diffs
 - ~package-upgrade-guard-max-download-size~ - Maximum downloaded artifact size
-- ~package-upgrade-guard-max-review-files~ - Maximum number of files compared per review
-- ~package-upgrade-guard-max-total-diff-size~ - Maximum aggregate archive diff size
+- ~package-upgrade-guard-max-review-files~ - Maximum number of files compared before the review requires manual incomplete-review approval
+- ~package-upgrade-guard-max-total-diff-size~ - Maximum aggregate archive diff size before the review requires manual incomplete-review approval
+- ~package-upgrade-guard-prefer-built-in-review~ - Delegate archive package review to Emacs' built-in support when available
 - ~package-upgrade-guard-security-diff-regexp-list~ - Regexps used by security-only diff mode
+- ~package-upgrade-guard-security-active-document-regexp-list~ - Regexps for active document constructs that require manual review
 
 Security highlighting is a review aid based on configurable heuristics, not a
 proof that unmatched content is safe.  It never hides unmatched changes.
 Every detected change requires manual approval.  A complete comparison with no
-differences proceeds without prompting.
+differences proceeds without prompting.  Incomplete reviews display the
+available review buffer and require explicit manual approval.
 
 * Requirements
 
-- Emacs 27.1 or later
+- Emacs 30.2 or later
 - Standard packages: ~package~ and ~diff~
 - Git-based VC upgrade review requires Emacs' ~package-vc~ support and ~git~ in your PATH
 
@@ -119,13 +126,14 @@ Package Upgrade Guard is designed for defensive security purposes:
 - Allows users to make informed decisions about package upgrades
 - Shows the reviewed changes before package modifications are applied
 - Requires manual approval for every reviewed change; direct new installations are outside its review scope
-- Cancels installation when review, artifact verification, or VC validation fails
+- Cancels installation when artifact verification or complete VC validation fails
 
 * Limitations
 
-- Oversized downloads, review trees, and diffs cancel review
+- Oversized downloads cancel review; oversized review trees and diffs require explicit incomplete-review approval
 - Binary files are not text-diffed (shown as modified with size changes)
 - Security-only matching is heuristic and cannot prove that arbitrary Emacs Lisp is safe
+- Emacs versions before 30.2 are not declared supported until tested
 - Temporary files are created during analysis
 
 * Troubleshooting
