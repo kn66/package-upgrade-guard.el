@@ -10,8 +10,9 @@
 
 ;;; Commentary:
 
-;; Shows diff for all package upgrades/installations to help users review
-;; changes before proceeding.  Supports both ELPA/MELPA archives and VC packages.
+;; Shows diffs for package upgrades and modifications to installed packages.
+;; Direct new installations are intentionally outside the review scope.  Supports
+;; both ELPA/MELPA archives and VC packages.
 
 ;;; Code:
 
@@ -211,6 +212,9 @@ Incomplete approvals fall back to FUNCTION and ARGS with the guard disabled."
     (unwind-protect
         (if (gethash key package-upgrade-guard--approved-incomplete-vc-reviews)
             (let ((package-upgrade-guard-enabled nil))
+              (message
+               "Proceeding with explicitly approved unpinned VC upgrade: %s"
+               key)
               (apply function args))
           (package-upgrade-guard--install-reviewed-vc-commit pkg-desc))
       (remhash key package-upgrade-guard--reviewed-vc-commits)
@@ -351,7 +355,7 @@ package name."
   (if (not package-upgrade-guard-enabled)
       (funcall orig-fun name)
     (let* ((package
-             (package-upgrade-guard--coerce-package-name name))
+            (package-upgrade-guard--coerce-package-name name))
            (pkg-desc
             (package-upgrade-guard--package-desc package 'installed))
            (approved nil))
@@ -406,19 +410,19 @@ DONT-SELECT is passed through to ORIG-FUN."
         (if (or (null review-transaction)
                 (package-upgrade-guard--review-install-transaction
                  review-transaction))
-              (progn
-                (when review-transaction
-                  (message
-                   "Diff check passed for %s. Proceeding with installation..."
-                   name))
-                (if transaction
-                    (package-upgrade-guard--call-with-reviewed-artifacts-allowing
-                     unreviewed orig-fun pkg dont-select)
-                  (package-upgrade-guard--call-with-guard-disabled
-                   orig-fun pkg dont-select)))
-            (message
-             "Diff check rejected for %s. Installation cancelled."
-             name))))))
+            (progn
+              (when review-transaction
+                (message
+                 "Diff check passed for %s. Proceeding with installation..."
+                 name))
+              (if transaction
+                  (package-upgrade-guard--call-with-reviewed-artifacts-allowing
+                   unreviewed orig-fun pkg dont-select)
+                (package-upgrade-guard--call-with-guard-disabled
+                 orig-fun pkg dont-select)))
+          (message
+           "Diff check rejected for %s. Installation cancelled."
+           name))))))
 
 (defun package-upgrade-guard--advice-package-upgrade-all
     (orig-fun &optional query)
@@ -596,11 +600,11 @@ APPROVED-INSTALLS and APPROVED-UPGRADES are the approved packages."
                     (package-upgrade-guard--menu-default-transaction)))
                  (install-list (car raw-transaction))
                  (delete-list (cdr raw-transaction)))
-             (if (not install-list)
-                 (with-current-buffer menu-buffer
-                   (goto-char menu-point)
-                   (package-upgrade-guard--call-with-guard-disabled
-                    orig-fun noquery))
+            (if (not install-list)
+                (with-current-buffer menu-buffer
+                  (goto-char menu-point)
+                  (package-upgrade-guard--call-with-guard-disabled
+                   orig-fun noquery))
               (let* ((partition
                       (package-upgrade-guard--partition-menu-transaction
                        install-list delete-list))
@@ -628,12 +632,12 @@ APPROVED-INSTALLS and APPROVED-UPGRADES are the approved packages."
 
                 (if (or approved-installs approved-upgrades pure-deletes)
                     ;; Proceed with execution; rejected installs/upgrades were unmarked.
-                     (with-current-buffer menu-buffer
-                       (goto-char menu-point)
-                       (package-upgrade-guard--call-with-reviewed-artifacts-allowing
-                        (package-upgrade-guard--new-install-artifacts
-                         approved-installs)
-                        orig-fun noquery))
+                    (with-current-buffer menu-buffer
+                      (goto-char menu-point)
+                      (package-upgrade-guard--call-with-reviewed-artifacts-allowing
+                       (package-upgrade-guard--new-install-artifacts
+                        approved-installs)
+                       orig-fun noquery))
                   (message "No approved package menu operations to execute")))))
         (set-marker menu-point nil)))))
 

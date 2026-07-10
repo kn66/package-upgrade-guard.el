@@ -173,6 +173,167 @@ Return a plist with `:complete' and `:reasons' entries."
                       reasons)))))))
     (list :complete complete :reasons (nreverse reasons))))
 
+(defun package-upgrade-guard--insert-vc-security-diff
+    (pkg-dir upstream fetch-succeeded working-tree-clean reviewed-commit
+             review-complete)
+  "Insert a security-focused VC diff and return its review state.
+PKG-DIR and UPSTREAM identify the comparison.  FETCH-SUCCEEDED,
+WORKING-TREE-CLEAN, REVIEWED-COMMIT, and REVIEW-COMPLETE describe the
+validation performed before the diff was generated."
+  (let* ((range (format "HEAD..%s" upstream))
+         (diff-result
+          (package-upgrade-guard--git-output-limited
+           pkg-dir package-upgrade-guard--max-unified-diff-size
+           "diff" range))
+         (diff-content (plist-get diff-result :output))
+         (diff-truncated (plist-get diff-result :truncated))
+         (name-status
+          (package-upgrade-guard--git-output
+           pkg-dir "diff" "--name-status" range))
+         (numstat
+          (package-upgrade-guard--git-output
+           pkg-dir "diff" "--numstat" range))
+         (classification
+          (and name-status numstat
+               (package-upgrade-guard--classify-git-security-changes
+                name-status numstat diff-content)))
+         (active-document-review
+          (if (and classification (plist-get classification :safe))
+              (package-upgrade-guard--git-active-document-review
+               pkg-dir upstream name-status)
+            '(:complete t :reasons nil)))
+         (sensitive-hunks
+          (and diff-content
+               (package-upgrade-guard--filter-security-unified-diff
+                diff-content)))
+         (review
+          (list
+           :matches
+           (if (and sensitive-hunks
+                    (not (string-empty-p sensitive-hunks)))
+               1
+             0)
+           :changes
+           (max (length (split-string (or name-status "") "\n" t))
+                (if (string-empty-p (or diff-content "")) 0 1))
+           :complete
+           (and diff-content name-status numstat
+                (not diff-truncated)
+                (plist-get active-document-review :complete))
+           :reasons
+           (append
+            (and classification (plist-get classification :reasons))
+            (plist-get active-document-review :reasons))))
+         review-no-changes)
+    (cond
+     ((or (null diff-content) (null name-status) (null numstat))
+      (setq review-complete nil)
+      (insert "Error getting complete diff metadata\n"))
+     (t
+      (when (and sensitive-hunks
+                 (not (string-empty-p sensitive-hunks)))
+        (insert "WARNING: sensitive patterns detected; complete diff follows.\n"))
+      (when (or diff-truncated
+                (> (length diff-content)
+                   package-upgrade-guard--max-unified-diff-size))
+        (setq review-complete nil)
+        (insert "Review aborted: VC diff exceeds the display limit.\n"))
+      (package-upgrade-guard--insert-vc-diff-content
+       diff-content diff-truncated)
+      (insert "\n")))
+    (when-let ((reasons (plist-get review :reasons)))
+      (insert "Manual approval required:\n")
+      (dolist (reason reasons)
+        (insert (format "  - %s\n" reason))))
+    (when (and fetch-succeeded review-complete working-tree-clean
+               reviewed-commit
+               (package-upgrade-guard--review-no-changes-p review))
+      (setq review-no-changes t))
+    (list :complete review-complete :no-changes review-no-changes)))
+
+(defun package-upgrade-guard--insert-vc-normal-diff
+    (pkg-dir upstream fetch-succeeded review-complete)
+  "Insert a normal VC diff and return its review state."
+  (let* ((diff-result
+          (package-upgrade-guard--git-output-limited
+           pkg-dir package-upgrade-guard--max-unified-diff-size
+           "diff" (format "HEAD..%s" upstream)))
+         (diff-content (plist-get diff-result :output))
+         (diff-truncated (plist-get diff-result :truncated))
+         review-no-changes)
+    (cond
+     ((null diff-content)
+      (setq review-complete nil)
+      (insert "Error getting complete diff\n"))
+     ((string-empty-p diff-content)
+      (insert "No changes in diff\n")
+      (when fetch-succeeded
+        (setq review-no-changes t)))
+     (t
+      (when (or diff-truncated
+                (> (length diff-content)
+                   package-upgrade-guard--max-unified-diff-size))
+        (setq review-complete nil)
+        (insert "Review aborted: VC diff exceeds the display limit.\n"))
+      (package-upgrade-guard--insert-vc-diff-content
+       diff-content diff-truncated)
+      (insert "\n")))
+    (list :complete review-complete :no-changes review-no-changes)))
+
+(defun package-upgrade-guard--insert-vc-diff-review
+    (pkg-dir upstream fetch-succeeded working-tree-clean reviewed-commit
+             review-complete)
+  "Insert the configured VC diff and return its review state."
+  (condition-case err
+      (if (package-upgrade-guard--security-diff-only-p)
+          (package-upgrade-guard--insert-vc-security-diff
+           pkg-dir upstream fetch-succeeded working-tree-clean
+           reviewed-commit review-complete)
+        (package-upgrade-guard--insert-vc-normal-diff
+         pkg-dir upstream fetch-succeeded review-complete))
+    (error
+     (insert (format "Error getting diff: %s\n" err))
+     '(:complete nil :no-changes nil))))
+
+(defun package-upgrade-guard--approve-vc-review
+    (pkg-desc diff-buffer review-complete review-no-changes pinnable
+              reviewed-commit)
+  "Ask for and record approval of a completed VC review."
+  (let* ((pkg-name (package-desc-name pkg-desc))
+         (key (package-desc-full-name pkg-desc))
+         (approved
+          (cond
+           ((not review-complete)
+            (display-buffer diff-buffer)
+            (package-upgrade-guard--ask-user-approval
+             pkg-desc
+             (if pinnable
+                 (concat "upgrade VC package at the pinned reviewed commit "
+                         "despite an incomplete review")
+               (concat "perform an unpinned VC upgrade despite an incomplete "
+                       "review; the installed commit may differ from the "
+                       "displayed review"))))
+           (review-no-changes
+            (package-upgrade-guard--cleanup-diff-buffers)
+            (message
+             "Package review: no differences found for %s; proceeding"
+             pkg-name)
+            t)
+           (t
+            (display-buffer diff-buffer)
+            (package-upgrade-guard--ask-user-approval
+             pkg-desc "upgrade VC package")))))
+    (when approved
+      (if pinnable
+          (progn
+            (puthash key reviewed-commit
+                     package-upgrade-guard--reviewed-vc-commits)
+            (remhash key
+                     package-upgrade-guard--approved-incomplete-vc-reviews))
+        (puthash key t package-upgrade-guard--approved-incomplete-vc-reviews)
+        (remhash key package-upgrade-guard--reviewed-vc-commits)))
+    approved))
+
 (defun package-upgrade-guard--insert-git-command
     (directory empty-message &rest args)
   "Run git ARGS in DIRECTORY and insert output.
@@ -196,66 +357,82 @@ it is non-nil.  Return non-nil on success."
 (defun package-upgrade-guard--show-tarball-diff (pkg-desc)
   "Show diff for tarball package PKG-DESC."
   (let* ((pkg-name (package-desc-name pkg-desc))
+         (pkg-full-name (package-desc-full-name pkg-desc))
          (old-dir
           (package-upgrade-guard--find-installed-package-dir
            pkg-name))
-         (temp-dir
-          (package-upgrade-guard--download-package-safely pkg-desc))
-         (empty-dir (unless old-dir
-                      (make-temp-file "package-upgrade-guard-empty-" t)))
-         (comparison-dir (or old-dir empty-dir))
-         (action (if old-dir "upgrade package" "install new package")))
+         (review-dir
+          (expand-file-name pkg-full-name
+                            (package-upgrade-guard--get-temp-dir)))
+         temp-dir
+         empty-dir
+         approved)
     (unwind-protect
-        (let ((diff-buffer
-               (get-buffer-create "*Package Security Diff*"))
-              (old-version
-               (package-upgrade-guard--get-version-from-dir old-dir))
-              (new-version
-               (package-version-join (package-desc-version pkg-desc)))
-              review)
-        (with-current-buffer diff-buffer
-          (when buffer-read-only
-            (read-only-mode -1))
-          (erase-buffer)
-          (insert (format "Diff for package %s:\n" pkg-name))
-          (insert
-           (format "Old version: %s\n" (or old-version "unknown")))
-          (insert (format "New version: %s\n\n" new-version))
+        (progn
+          (setq temp-dir
+                (package-upgrade-guard--download-package-safely pkg-desc))
+          (setq empty-dir
+                (unless old-dir
+                  (make-temp-file "package-upgrade-guard-empty-" t)))
+          (let ((diff-buffer
+                 (get-buffer-create "*Package Security Diff*"))
+                (old-version
+                 (package-upgrade-guard--get-version-from-dir old-dir))
+                (new-version
+                 (package-version-join (package-desc-version pkg-desc)))
+                (comparison-dir (or old-dir empty-dir))
+                (action (if old-dir "upgrade package" "install new package"))
+                review)
+            (with-current-buffer diff-buffer
+              (when buffer-read-only
+                (read-only-mode -1))
+              (erase-buffer)
+              (insert (format "Diff for package %s:\n" pkg-name))
+              (insert
+               (format "Old version: %s\n" (or old-version "unknown")))
+              (insert (format "New version: %s\n\n" new-version))
 
-          ;; Generate diff
-          (setq review
-                (package-upgrade-guard--generate-diff
-                 comparison-dir temp-dir))
+              ;; Generate diff
+              (setq review
+                    (package-upgrade-guard--generate-diff
+                     comparison-dir temp-dir))
 
-          (diff-mode)
-          (package-upgrade-guard--highlight-security-patterns)
-          (read-only-mode 1)
-          (goto-char (point-min)))
+              (diff-mode)
+              (package-upgrade-guard--highlight-security-patterns)
+              (read-only-mode 1)
+              (goto-char (point-min)))
 
-        (cond
-         ((package-upgrade-guard--review-no-changes-p review)
-          (package-upgrade-guard--cleanup-diff-buffers)
-          (message
-           "Package review: no differences found for %s; proceeding"
-           pkg-name)
-          t)
-         ((not (plist-get review :complete))
-          (display-buffer diff-buffer)
-          (package-upgrade-guard--ask-user-approval
-           pkg-desc (format "%s despite an incomplete review" action)))
-         (t
-          (display-buffer diff-buffer)
-          (package-upgrade-guard--ask-user-approval
-           pkg-desc action))))
+            (setq approved
+                  (cond
+                   ((package-upgrade-guard--review-no-changes-p review)
+                    (package-upgrade-guard--cleanup-diff-buffers)
+                    (message
+                     "Package review: no differences found for %s; proceeding"
+                     pkg-name)
+                    t)
+                   ((not (plist-get review :complete))
+                    (display-buffer diff-buffer)
+                    (package-upgrade-guard--ask-user-approval
+                     pkg-desc
+                     (format "%s despite an incomplete review" action)))
+                   (t
+                    (display-buffer diff-buffer)
+                    (package-upgrade-guard--ask-user-approval
+                     pkg-desc action))))
+            approved))
       (when empty-dir
-        (delete-directory empty-dir t)))))
+        (delete-directory empty-dir t))
+      (when (file-exists-p review-dir)
+        (delete-directory review-dir t))
+      (unless approved
+        (remhash pkg-full-name
+                 package-upgrade-guard--reviewed-artifact-digests)))))
 
 (defun package-upgrade-guard--show-vc-diff (pkg-desc)
   "Show git diff for VC package PKG-DESC.
 Returns t if user approves, nil if rejected."
   (let* ((pkg-dir (package-desc-dir pkg-desc))
          (pkg-name (package-desc-name pkg-desc))
-         (key (package-desc-full-name pkg-desc))
          (default-directory pkg-dir))
 
     (unless (and pkg-dir (file-directory-p pkg-dir))
@@ -334,118 +511,12 @@ Returns t if user approves, nil if rejected."
             (when (package-upgrade-guard--security-diff-only-p)
               (insert
                "Diff mode: complete available diff with sensitive-pattern highlighting\n"))
-            (condition-case err
-                (if (package-upgrade-guard--security-diff-only-p)
-                    (let* ((range (format "HEAD..%s" upstream))
-                           (diff-result
-                            (package-upgrade-guard--git-output-limited
-                             pkg-dir
-                             package-upgrade-guard--max-unified-diff-size
-                             "diff" range))
-                           (diff-content (plist-get diff-result :output))
-                           (diff-truncated
-                            (plist-get diff-result :truncated))
-                           (name-status
-                            (package-upgrade-guard--git-output
-                             pkg-dir "diff" "--name-status" range))
-                           (numstat
-                            (package-upgrade-guard--git-output
-                             pkg-dir "diff" "--numstat" range))
-                           (classification
-                            (and name-status numstat
-                                 (package-upgrade-guard--classify-git-security-changes
-                                  name-status numstat diff-content)))
-                           (active-document-review
-                            (if (and classification
-                                     (plist-get classification :safe))
-                                (package-upgrade-guard--git-active-document-review
-                                 pkg-dir upstream name-status)
-                              '(:complete t :reasons nil)))
-                           (sensitive-hunks
-                            (and diff-content
-                                 (package-upgrade-guard--filter-security-unified-diff
-                                  diff-content)))
-                           (review
-                            (list
-                             :matches
-                              (if (and sensitive-hunks
-                                       (not (string-empty-p sensitive-hunks)))
-                                  1
-                                 0)
-                              :changes
-                              (max
-                               (length
-                                (split-string (or name-status "") "\n" t))
-                              (if (string-empty-p (or diff-content "")) 0 1))
-                              :complete
-                             (and diff-content name-status numstat
-                                  (not diff-truncated)
-                                  (plist-get active-document-review :complete))
-                              :reasons
-                             (append
-                              (and classification
-                                   (plist-get classification :reasons))
-                              (plist-get active-document-review :reasons)))))
-                      (cond
-                       ((or (null diff-content)
-                            (null name-status)
-                            (null numstat))
-                        (setq review-complete nil)
-                        (insert "Error getting complete diff metadata\n"))
-                        (t
-                         (when (and sensitive-hunks
-                                    (not (string-empty-p sensitive-hunks)))
-                           (insert
-                            "WARNING: sensitive patterns detected; complete diff follows.\n"))
-                         (when (or diff-truncated
-                                   (> (length diff-content)
-                                      package-upgrade-guard--max-unified-diff-size))
-                           (setq review-complete nil)
-                           (insert
-                            "Review aborted: VC diff exceeds the display limit.\n"))
-                         (package-upgrade-guard--insert-vc-diff-content
-                          diff-content diff-truncated)
-                         (insert "\n")))
-                      (when-let ((reasons (plist-get review :reasons)))
-                        (insert "Manual approval required:\n")
-                        (dolist (reason reasons)
-                          (insert (format "  - %s\n" reason))))
-                      (when (and fetch-succeeded
-                                 review-complete
-                                 working-tree-clean
-                                 reviewed-commit
-                                 (package-upgrade-guard--review-no-changes-p
-                                  review))
-                        (setq review-no-changes t)))
-                  (let* ((diff-result
-                          (package-upgrade-guard--git-output-limited
-                           pkg-dir
-                           package-upgrade-guard--max-unified-diff-size
-                           "diff" (format "HEAD..%s" upstream)))
-                         (diff-content (plist-get diff-result :output))
-                         (diff-truncated
-                          (plist-get diff-result :truncated)))
-                    (cond
-                     ((null diff-content)
-                      (setq review-complete nil)
-                      (insert "Error getting complete diff\n"))
-                     ((string-empty-p diff-content)
-                      (insert "No changes in diff\n")
-                      (when fetch-succeeded
-                        (setq review-no-changes t)))
-                     (t
-                      (when (or diff-truncated
-                                (> (length diff-content)
-                                   package-upgrade-guard--max-unified-diff-size))
-                        (setq review-complete nil)
-                        (insert
-                         "Review aborted: VC diff exceeds the display limit.\n"))
-                      (package-upgrade-guard--insert-vc-diff-content
-                       diff-content diff-truncated)
-                      (insert "\n")))))
-              (error
-               (setq review-complete nil)
-               (insert (format "Error getting diff: %s\n" err))))))
+            (let ((review
+                   (package-upgrade-guard--insert-vc-diff-review
+                    pkg-dir upstream fetch-succeeded working-tree-clean
+                    reviewed-commit review-complete)))
+              (setq review-complete (plist-get review :complete)
+                    review-no-changes (plist-get review :no-changes)))))
 
         (diff-mode)
         (package-upgrade-guard--highlight-security-patterns)
@@ -453,33 +524,10 @@ Returns t if user approves, nil if rejected."
         (font-lock-ensure)
         (goto-char (point-min)))
 
-      (let ((approved
-             (cond
-              ((not review-complete)
-               (display-buffer diff-buffer)
-               (package-upgrade-guard--ask-user-approval
-                pkg-desc "upgrade VC package despite an incomplete review"))
-              (review-no-changes
-               (package-upgrade-guard--cleanup-diff-buffers)
-               (message
-                "Package review: no differences found for %s; proceeding"
-                pkg-name)
-               t)
-              (t
-               (display-buffer diff-buffer)
-               (package-upgrade-guard--ask-user-approval
-                pkg-desc "upgrade VC package")))))
-        (when approved
-          (if (and fetch-succeeded working-tree-clean reviewed-commit)
-              (progn
-                (puthash key reviewed-commit
-                         package-upgrade-guard--reviewed-vc-commits)
-                (remhash key
-                         package-upgrade-guard--approved-incomplete-vc-reviews))
-            (puthash key t
-                     package-upgrade-guard--approved-incomplete-vc-reviews)
-            (remhash key package-upgrade-guard--reviewed-vc-commits)))
-        approved))))
+      (package-upgrade-guard--approve-vc-review
+       pkg-desc diff-buffer review-complete review-no-changes
+       (and fetch-succeeded working-tree-clean reviewed-commit)
+       reviewed-commit))))
 
 (defun package-upgrade-guard--ask-user-approval (pkg-desc action)
   "Ask user for approval to ACTION on PKG-DESC.

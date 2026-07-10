@@ -57,6 +57,13 @@ For git-based VC packages, the tool shows:
 - New commits to be pulled
 - Detailed diff of changes from the configured upstream branch
 
+A VC review is incomplete when the diff is too large, the working tree is
+dirty, fetch fails, no upstream can be resolved, or complete diff metadata is
+unavailable.  Approval remains available in these cases.  When the reviewed
+commit is known it is installed exactly; otherwise the prompt explicitly warns
+that the upgrade is unpinned and may install a commit different from the
+displayed review.
+
 ** Regular Packages
 
 For ELPA/MELPA packages, the tool shows:
@@ -84,6 +91,7 @@ For ELPA/MELPA packages, the tool shows:
 
 ;; Reject unexpectedly large downloads and flag oversized reviews as incomplete.
 (setopt package-upgrade-guard-max-download-size (* 50 1024 1024))
+(setopt package-upgrade-guard-download-timeout 30)
 (setopt package-upgrade-guard-max-review-files 5000)
 (setopt package-upgrade-guard-max-total-diff-size (* 2 1024 1024))
 
@@ -99,6 +107,7 @@ The package provides several customization options through the ~package-upgrade-
 - ~package-upgrade-guard-temp-dir~ - Custom base directory for temporary review sessions
 - ~package-upgrade-guard-diff-mode~ - Show normal diffs or highlight security-sensitive patterns in complete diffs
 - ~package-upgrade-guard-max-download-size~ - Maximum downloaded artifact size
+- ~package-upgrade-guard-download-timeout~ - Maximum seconds allowed for an artifact download
 - ~package-upgrade-guard-max-review-files~ - Maximum number of files compared before the review requires manual incomplete-review approval
 - ~package-upgrade-guard-max-total-diff-size~ - Maximum aggregate archive diff size before the review requires manual incomplete-review approval
 - ~package-upgrade-guard-prefer-built-in-review~ - Delegate archive package review to Emacs' built-in support when available
@@ -115,6 +124,8 @@ available review buffer and require explicit manual approval.
 
 - Emacs 30.2 or later
 - Standard packages: ~package~ and ~diff~
+- Unified archive diffs require either ~git~ (preferred, especially on Windows)
+  or a GNU-compatible ~diff~ executable in your PATH
 - Git-based VC upgrade review requires Emacs' ~package-vc~ support and ~git~ in your PATH
 
 * Security Considerations
@@ -126,7 +137,9 @@ Package Upgrade Guard is designed for defensive security purposes:
 - Allows users to make informed decisions about package upgrades
 - Shows the reviewed changes before package modifications are applied
 - Requires manual approval for every reviewed change; direct new installations are outside its review scope
-- Cancels installation when artifact verification or complete VC validation fails
+- Cancels installation when artifact verification fails
+- Requires explicit approval for incomplete VC validation and distinguishes
+  pinned installation from an unpinned network upgrade in the prompt
 
 * Limitations
 
@@ -134,7 +147,10 @@ Package Upgrade Guard is designed for defensive security purposes:
 - Binary files are not text-diffed (shown as modified with size changes)
 - Security-only matching is heuristic and cannot prove that arbitrary Emacs Lisp is safe
 - Emacs versions before 30.2 are not declared supported until tested
-- Temporary files are created during analysis
+- Temporary files are created during analysis and removed after each review;
+  an interrupted Emacs process can still leave its session directory behind
+- Executable mode bits are not reliably represented on Windows, so executable
+  documentation checks are primarily meaningful on POSIX filesystems
 
 * Troubleshooting
 

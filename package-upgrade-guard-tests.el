@@ -103,29 +103,91 @@ DIR is used as the descriptor's installed directory when non-nil."
        (lambda (_desc) (setq called t)) pkg-desc))
     (should called)))
 
-(ert-deftest package-upgrade-guard-remote-content-length-uses-head ()
-  "Artifact size preflight should read Content-Length without a GET body."
-  (let (buffer requested-url)
+(ert-deftest package-upgrade-guard-limited-http-retrieval-strips-headers ()
+  "A completed bounded HTTP retrieval should return only artifact bytes."
+  (let (response)
     (unwind-protect
-        (cl-letf (((symbol-function 'url-retrieve-synchronously)
-                   (lambda (url &rest _args)
-                     (setq requested-url url)
-                     (setq buffer
+        (cl-letf (((symbol-function 'url-retrieve)
+                   (lambda (_url callback &rest _args)
+                     (setq response
                            (generate-new-buffer
-                            " *package-upgrade-guard-head*"))
-                     (with-current-buffer buffer
-                       (insert "HTTP/1.1 200 OK\r\n")
-                       (insert "Content-Length: 12345\r\n\r\n"))
-                     buffer)))
-          (should
-           (= 12345
-              (package-upgrade-guard--remote-content-length
-               "https://example.invalid/packages/" "pkg-1.0.tar")))
-          (should
-           (equal requested-url "https://example.invalid/packages/pkg-1.0.tar"))
-          (should-not (buffer-live-p buffer)))
-      (when (and buffer (buffer-live-p buffer))
-        (kill-buffer buffer)))))
+                            " *package-upgrade-guard-http*"))
+                     (with-current-buffer response
+                       (set-buffer-multibyte nil)
+                       (insert "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n")
+                       (setq-local url-http-end-of-headers
+                                   (copy-marker (point)))
+                       (setq-local url-http-response-status 200)
+                       (insert "body"))
+                     (funcall callback nil)
+                     response)))
+          (let ((buffer
+                 (package-upgrade-guard--retrieve-url-limited
+                  "https://example.invalid/pkg.tar" 4)))
+            (should (eq buffer response))
+            (should (equal (with-current-buffer buffer (buffer-string))
+                           "body"))))
+      (when (and response (buffer-live-p response))
+        (kill-buffer response)))))
+
+(ert-deftest package-upgrade-guard-limited-http-retrieval-aborts-early ()
+  "An HTTP response exceeding the limit should stop its process immediately."
+  (let (response deleted)
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (_url _callback &rest _args)
+                 (setq response
+                       (generate-new-buffer
+                        " *package-upgrade-guard-http-large*"))
+                 (with-current-buffer response
+                   (set-buffer-multibyte nil)
+                   (setq-local url-http-end-of-headers
+                               (copy-marker (point-min))))
+                 response))
+              ((symbol-function 'get-buffer-process)
+               (lambda (_buffer) 'package-upgrade-guard-test-process))
+              ((symbol-function 'process-live-p) (lambda (_process) t))
+              ((symbol-function 'delete-process)
+               (lambda (_process) (setq deleted t)))
+              ((symbol-function 'accept-process-output)
+               (lambda (&rest _args)
+                 (with-current-buffer response
+                   (insert (make-string 11 ?x)))
+                 nil)))
+      (should-error
+       (package-upgrade-guard--retrieve-url-limited
+        "https://example.invalid/pkg.tar" 10))
+      (should deleted)
+      (should-not (buffer-live-p response)))))
+
+(ert-deftest package-upgrade-guard-limited-http-retrieval-times-out ()
+  "A stalled HTTP response should stop after the configured timeout."
+  (let ((package-upgrade-guard-download-timeout 1)
+        (clock 0)
+        response
+        deleted)
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (_url _callback &rest _args)
+                 (setq response
+                       (generate-new-buffer
+                        " *package-upgrade-guard-http-stalled*"))))
+              ((symbol-function 'float-time)
+               (lambda (&optional _time)
+                 (prog1 clock
+                   (setq clock (+ clock 2)))))
+              ((symbol-function 'get-buffer-process)
+               (lambda (_buffer) 'package-upgrade-guard-test-process))
+              ((symbol-function 'process-live-p) (lambda (_process) t))
+              ((symbol-function 'delete-process)
+               (lambda (_process) (setq deleted t)))
+              ((symbol-function 'accept-process-output)
+               (lambda (&rest _args) nil)))
+      (let ((err
+             (should-error
+              (package-upgrade-guard--retrieve-url-limited
+               "https://example.invalid/pkg.tar" 10))))
+        (should (string-match-p "timed out" (error-message-string err))))
+      (should deleted)
+      (should-not (buffer-live-p response)))))
 
 (ert-deftest package-upgrade-guard-unreviewed-upgrade-dependency-is-rejected ()
   "An unreviewed dependency that was not a direct install must fail closed."
@@ -419,7 +481,7 @@ DIR is used as the descriptor's installed directory when non-nil."
               (new-file (expand-file-name "pkg.el" new-dir)))
           (write-region "(message \"old\")\n" nil old-file nil 'silent)
           (write-region "(message \"new\")\n" nil new-file nil 'silent)
-          (cl-letf (((symbol-function 'diff-no-select)
+          (cl-letf (((symbol-function 'package-upgrade-guard--run-unified-diff)
                      (lambda (&rest _args) (error "diff unavailable"))))
             (let ((section
                    (package-upgrade-guard--unified-file-diff-section
@@ -433,6 +495,29 @@ DIR is used as the descriptor's installed directory when non-nil."
                               package-upgrade-guard--security-review-reasons)))))
       (delete-directory old-dir t)
       (delete-directory new-dir t))))
+
+(ert-deftest package-upgrade-guard-unified-diff-bypasses-the-shell ()
+  "Unified diff generation should call an executable directly with path args."
+  (let (captured)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (name) (and (equal name "git") "git.exe")))
+              ((symbol-function 'process-file)
+               (lambda (&rest args)
+                 (setq captured args)
+                 (insert "diff --git a/old b/new\n-old\n+new\n")
+                 1))
+              ((symbol-function 'package-upgrade-guard--files-identical-p)
+               (lambda (_old _new) nil)))
+      (should
+       (string-match-p
+        "+new"
+        (package-upgrade-guard--run-unified-diff
+         "C:/old path/pkg.el" "C:/new path/pkg.el")))
+      (should
+       (equal captured
+              '("git.exe" nil t nil
+                "--no-pager" "diff" "--no-index" "--no-ext-diff" "--"
+                "C:/old path/pkg.el" "C:/new path/pkg.el"))))))
 
 (ert-deftest package-upgrade-guard-no-change-review-proceeds-without-prompt ()
   "A complete review with no differences should not prompt."
@@ -448,9 +533,9 @@ DIR is used as the descriptor's installed directory when non-nil."
                (lambda (_desc) "/tmp/pkg-2.0"))
               ((symbol-function 'package-upgrade-guard--get-version-from-dir)
                (lambda (_dir) "1.0"))
-               ((symbol-function 'package-upgrade-guard--generate-diff)
-                (lambda (_old _new)
-                  '(:matches 0 :changes 0 :complete t)))
+              ((symbol-function 'package-upgrade-guard--generate-diff)
+               (lambda (_old _new)
+                 '(:matches 0 :changes 0 :complete t)))
               ((symbol-function 'display-buffer)
                (lambda (&rest _args) (setq displayed t)))
               ((symbol-function 'package-upgrade-guard--ask-user-approval)
@@ -458,6 +543,48 @@ DIR is used as the descriptor's installed directory when non-nil."
       (should (package-upgrade-guard--show-tarball-diff pkg-desc))
       (should-not prompted)
       (should-not displayed))))
+
+(ert-deftest package-upgrade-guard-rejected-review-cleans-extracted-tree ()
+  "A rejected archive review should remove its tree and pending digest."
+  (let* ((base-dir (make-temp-file "package-guard-review-base-" t))
+         (old-dir (make-temp-file "package-guard-review-old-" t))
+         (pkg-desc (package-upgrade-guard-test--desc 'pkg '(2 0)))
+         (key (package-desc-full-name pkg-desc))
+         (package-upgrade-guard-temp-dir base-dir)
+         (package-upgrade-guard--temp-dir nil)
+         review-dir)
+    (unwind-protect
+        (cl-letf (((symbol-function
+                    'package-upgrade-guard--find-installed-package-dir)
+                   (lambda (_name) old-dir))
+                  ((symbol-function
+                    'package-upgrade-guard--download-package-safely)
+                   (lambda (_desc)
+                     (setq review-dir
+                           (expand-file-name
+                            key (package-upgrade-guard--get-temp-dir)))
+                     (make-directory review-dir t)
+                     (puthash key "digest"
+                              package-upgrade-guard--reviewed-artifact-digests)
+                     review-dir))
+                  ((symbol-function 'package-upgrade-guard--get-version-from-dir)
+                   (lambda (_dir) "1.0"))
+                  ((symbol-function 'package-upgrade-guard--generate-diff)
+                   (lambda (_old _new)
+                     '(:matches 0 :changes 1 :complete t)))
+                  ((symbol-function 'display-buffer) #'ignore)
+                  ((symbol-function 'package-upgrade-guard--ask-user-approval)
+                   (lambda (&rest _args) nil)))
+          (should-not (package-upgrade-guard--show-tarball-diff pkg-desc))
+          (should-not (file-exists-p review-dir))
+          (should-not
+           (gethash key package-upgrade-guard--reviewed-artifact-digests)))
+      (remhash key package-upgrade-guard--reviewed-artifact-digests)
+      (package-upgrade-guard--cleanup-temp-dir)
+      (when (file-exists-p base-dir)
+        (delete-directory base-dir t))
+      (when (file-exists-p old-dir)
+        (delete-directory old-dir t)))))
 
 (ert-deftest package-upgrade-guard-incomplete-review-prompts ()
   "An incomplete review must ask for manual approval."
@@ -470,7 +597,7 @@ DIR is used as the descriptor's installed directory when non-nil."
                (lambda (_name) "/tmp/pkg-1.0"))
               ((symbol-function
                 'package-upgrade-guard--download-package-safely)
-              (lambda (_desc) "/tmp/pkg-2.0"))
+               (lambda (_desc) "/tmp/pkg-2.0"))
               ((symbol-function 'package-upgrade-guard--get-version-from-dir)
                (lambda (_dir) "1.0"))
               ((symbol-function 'package-upgrade-guard--generate-diff)
@@ -605,12 +732,12 @@ DIR is used as the descriptor's installed directory when non-nil."
                      (lambda (&rest _args) t))
                     ((symbol-function 'package-upgrade-guard--git-upstream)
                      (lambda (_dir) "origin/main"))
-                     ((symbol-function 'package-upgrade-guard--git-output)
-                      (lambda (_dir &rest args)
-                        (cond
-                         ((equal (car args) "status") "")
-                         ((equal (car args) "rev-parse") "deadbeef")
-                         (t ""))))
+                    ((symbol-function 'package-upgrade-guard--git-output)
+                     (lambda (_dir &rest args)
+                       (cond
+                        ((equal (car args) "status") "")
+                        ((equal (car args) "rev-parse") "deadbeef")
+                        (t ""))))
                     ((symbol-function
                       'package-upgrade-guard--git-output-limited)
                      (lambda (&rest _args)
@@ -709,12 +836,12 @@ DIR is used as the descriptor's installed directory when non-nil."
                      (lambda (&rest _args) t))
                     ((symbol-function 'package-upgrade-guard--git-upstream)
                      (lambda (_dir) "origin/main"))
-                     ((symbol-function 'package-upgrade-guard--git-output)
-                      (lambda (_dir &rest args)
-                        (cond
-                         ((equal (car args) "status") "")
-                         ((equal (car args) "rev-parse") "deadbeef")
-                         ((member "--name-status" args)
+                    ((symbol-function 'package-upgrade-guard--git-output)
+                     (lambda (_dir &rest args)
+                       (cond
+                        ((equal (car args) "status") "")
+                        ((equal (car args) "rev-parse") "deadbeef")
+                        ((member "--name-status" args)
                          (if (string-empty-p diff-content) "" "M\tpkg.el"))
                         ((member "--numstat" args)
                          (if (string-empty-p diff-content) "" "1\t1\tpkg.el"))
@@ -770,7 +897,44 @@ DIR is used as the descriptor's installed directory when non-nil."
             (should-not (package-upgrade-guard--show-vc-diff pkg-desc))
             (should (string-match-p
                      "despite an incomplete review" prompt-action))
+            (should (string-match-p "unpinned" prompt-action))
+            (should (string-match-p "may differ" prompt-action))
             (should prompted)))
+      (delete-directory pkg-dir t))))
+
+(ert-deftest package-upgrade-guard-vc-incomplete-pinned-review-prompts-clearly ()
+  "An incomplete review with a known commit should advertise pinned install."
+  (let* ((pkg-dir (make-temp-file "package-guard-vc-pinned-incomplete-" t))
+         (pkg-desc (package-upgrade-guard-test--desc 'pkg '(2 0) pkg-dir))
+         (package-upgrade-guard-diff-mode 'all)
+         prompt-action)
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" pkg-dir))
+          (cl-letf (((symbol-function
+                      'package-upgrade-guard--insert-git-command)
+                     (lambda (&rest _args) t))
+                    ((symbol-function 'package-upgrade-guard--git-upstream)
+                     (lambda (_dir) "origin/main"))
+                    ((symbol-function 'package-upgrade-guard--git-output)
+                     (lambda (_dir &rest args)
+                       (cond
+                        ((equal (car args) "status") "")
+                        ((equal (car args) "rev-parse") "deadbeef")
+                        (t ""))))
+                    ((symbol-function
+                      'package-upgrade-guard--git-output-limited)
+                     (lambda (&rest _args)
+                       '(:output "truncated diff" :truncated t)))
+                    ((symbol-function 'display-buffer) #'ignore)
+                    ((symbol-function
+                      'package-upgrade-guard--ask-user-approval)
+                     (lambda (_desc action)
+                       (setq prompt-action action)
+                       nil)))
+            (should-not (package-upgrade-guard--show-vc-diff pkg-desc))
+            (should (string-match-p "pinned reviewed commit" prompt-action))
+            (should-not (string-match-p "unpinned" prompt-action))))
       (delete-directory pkg-dir t))))
 
 (ert-deftest package-upgrade-guard-vc-incomplete-approval-runs-original ()
@@ -813,6 +977,8 @@ DIR is used as the descriptor's installed directory when non-nil."
             (should (eq called pkg-desc))
             (should (string-match-p
                      "despite an incomplete review" prompt-action))
+            (should (string-match-p "unpinned" prompt-action))
+            (should (string-match-p "may differ" prompt-action))
             (should-not
              (gethash key
                       package-upgrade-guard--approved-incomplete-vc-reviews))))
@@ -1269,13 +1435,18 @@ DIR is used as the descriptor's installed directory when non-nil."
     (unwind-protect
         (let ((file (expand-file-name "README.md" new-dir)))
           (write-region "Documentation\n" nil file nil 'silent)
-          (set-file-modes file #o755)
-          (with-temp-buffer
-            (let ((review (package-upgrade-guard--generate-diff
-                           old-dir new-dir)))
-              (should (= 1 (plist-get review :changes)))
-              (should (member "new executable file: README.md"
-                              (plist-get review :reasons))))))
+          (let ((original-file-modes (symbol-function 'file-modes)))
+            (cl-letf (((symbol-function 'file-modes)
+                       (lambda (path &optional flag)
+                         (if (equal path file)
+                             #o755
+                           (funcall original-file-modes path flag)))))
+              (with-temp-buffer
+                (let ((review (package-upgrade-guard--generate-diff
+                               old-dir new-dir)))
+                  (should (= 1 (plist-get review :changes)))
+                  (should (member "new executable file: README.md"
+                                  (plist-get review :reasons))))))))
       (delete-directory old-dir t)
       (delete-directory new-dir t))))
 

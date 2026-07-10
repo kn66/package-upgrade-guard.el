@@ -48,6 +48,12 @@
   :type 'integer
   :group 'package-upgrade-guard)
 
+(defcustom package-upgrade-guard-download-timeout 30
+  "Maximum number of seconds allowed for one package artifact download.
+The timeout covers the complete HTTP transaction, including headers and body."
+  :type 'integer
+  :group 'package-upgrade-guard)
+
 (defcustom package-upgrade-guard-max-review-files 5000
   "Maximum number of file entries compared during one package review."
   :type 'integer
@@ -94,11 +100,11 @@ used to hide unmatched changes."
            "eval-after-load" "with-eval-after-load"
            "funcall" "apply" "command-execute" "call-interactively"
            "execute-kbd-macro"
-            "load" "load-file" "load-library" "load-with-code-conversion"
-            "load-theme" "require" "autoload" "module-load"
-            "native-elisp-load"
-            "native-compile" "byte-compile-file" "byte-code"
-            "eval-and-compile" "eval-when-compile"
+           "load" "load-file" "load-library" "load-with-code-conversion"
+           "load-theme" "require" "autoload" "module-load"
+           "native-elisp-load"
+           "native-compile" "byte-compile-file" "byte-code"
+           "eval-and-compile" "eval-when-compile"
            "read" "read-from-string" "intern" "fset" "defalias"
            "run-hooks" "run-hook-with-args"
            "run-hook-with-args-until-failure"
@@ -109,27 +115,27 @@ used to hide unmatched changes."
        symbol-end)
    (rx symbol-start
        (or "shell-command" "async-shell-command" "call-process"
-            "shell-command-to-string" "shell-command-on-region"
-            "call-process-shell-command" "call-process-region"
-            "process-file" "process-file-region"
-            "process-file-shell-command"
-            "process-lines" "process-lines-ignore-status"
-            "start-process" "start-process-shell-command"
-            "start-file-process" "start-file-process-shell-command"
-            "make-process" "make-pipe-process" "make-thread"
-            "make-serial-process" "compilation-start"
-            "executable-interpret"
-            "set-process-filter" "set-process-sentinel"
-            "process-send-string"
-            "process-send-region" "process-send-eof" "comint-exec"
-            "term-exec" "compile" "kill-emacs")
+           "shell-command-to-string" "shell-command-on-region"
+           "call-process-shell-command" "call-process-region"
+           "process-file" "process-file-region"
+           "process-file-shell-command"
+           "process-lines" "process-lines-ignore-status"
+           "start-process" "start-process-shell-command"
+           "start-file-process" "start-file-process-shell-command"
+           "make-process" "make-pipe-process" "make-thread"
+           "make-serial-process" "compilation-start"
+           "executable-interpret"
+           "set-process-filter" "set-process-sentinel"
+           "process-send-string"
+           "process-send-region" "process-send-eof" "comint-exec"
+           "term-exec" "compile" "kill-emacs")
        symbol-end)
    (rx symbol-start
-        (or "url-retrieve" "url-retrieve-synchronously" "url-queue-retrieve"
-            "url-copy-file" "url-insert-file-contents" "request" "plz"
-            "make-network-process"
-            "open-network-stream" "network-stream-open-starttls"
-            "open-network-stream-nowait" "gnutls-negotiate" "browse-url")
+       (or "url-retrieve" "url-retrieve-synchronously" "url-queue-retrieve"
+           "url-copy-file" "url-insert-file-contents" "request" "plz"
+           "make-network-process"
+           "open-network-stream" "network-stream-open-starttls"
+           "open-network-stream-nowait" "gnutls-negotiate" "browse-url")
        symbol-end)
    (rx symbol-start
        (or "dbus-call-method" "dbus-call-method-asynchronously"
@@ -143,20 +149,20 @@ used to hide unmatched changes."
            "save-buffer" "basic-save-buffer"
            "make-temp-file" "make-temp-directory"
            "delete-file" "delete-directory" "rename-file"
-            "copy-file" "make-directory" "make-symbolic-link"
-            "add-name-to-file" "set-file-modes" "set-file-times"
-            "set-file-acl" "set-file-extended-attributes"
-            "set-default-file-modes")
-        symbol-end)
-    (rx symbol-start
-        (or "setenv" "customize-set-variable" "customize-set-value"
-            "customize-save-variable"
-            "customize-save-customized" "custom-save-all" "desktop-save"
-            "define-key" "global-set-key" "local-set-key" "keymap-set"
-            "keymap-global-set" "substitute-key-definition"
-            "run-at-time" "run-with-timer" "run-with-idle-timer"
-            "timer-set-function" "server-eval-at")
-        symbol-end)
+           "copy-file" "make-directory" "make-symbolic-link"
+           "add-name-to-file" "set-file-modes" "set-file-times"
+           "set-file-acl" "set-file-extended-attributes"
+           "set-default-file-modes")
+       symbol-end)
+   (rx symbol-start
+       (or "setenv" "customize-set-variable" "customize-set-value"
+           "customize-save-variable"
+           "customize-save-customized" "custom-save-all" "desktop-save"
+           "define-key" "global-set-key" "local-set-key" "keymap-set"
+           "keymap-global-set" "substitute-key-definition"
+           "run-at-time" "run-with-timer" "run-with-idle-timer"
+           "timer-set-function" "server-eval-at")
+       symbol-end)
    (rx symbol-start
        (or "package-install" "package-delete" "package-vc-install"
            "package-vc-checkout" "package-refresh-contents"
