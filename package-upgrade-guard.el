@@ -75,7 +75,12 @@
 (defun package-upgrade-guard--call-with-guard-disabled (function &rest args)
   "Call FUNCTION with ARGS while guard review is disabled."
   (let ((package-upgrade-guard-enabled nil))
-    (apply function args)))
+    (if package-upgrade-guard--built-in-review-active
+        (cl-progv '(package-review-policy)
+            (list (and package-upgrade-guard--saved-package-review-policy-bound
+                       package-upgrade-guard--saved-package-review-policy))
+          (apply function args))
+      (apply function args))))
 
 (defun package-upgrade-guard--call-with-reviewed-artifacts (function &rest args)
   "Call FUNCTION with ARGS while enforcing reviewed artifact digests."
@@ -316,6 +321,9 @@ package name."
     (advice-add
      'package-menu-execute
      :around #'package-upgrade-guard--advice-package-menu-execute))
+  (advice-add
+   'package-reinstall
+   :around #'package-upgrade-guard--advice-package-reinstall)
   (when (fboundp 'package-vc-upgrade)
     (advice-add
      'package-vc-upgrade
@@ -339,6 +347,9 @@ package name."
   (advice-remove
    'package-menu-execute
    #'package-upgrade-guard--advice-package-menu-execute)
+  (advice-remove
+   'package-reinstall
+   #'package-upgrade-guard--advice-package-reinstall)
   (when (fboundp 'package-vc-upgrade)
     (advice-remove
      'package-vc-upgrade
@@ -423,6 +434,12 @@ DONT-SELECT is passed through to ORIG-FUN."
           (message
            "Diff check rejected for %s. Installation cancelled."
            name))))))
+
+(defun package-upgrade-guard--advice-package-reinstall (orig-fun pkg)
+  "Call ORIG-FUN for `package-reinstall' on PKG without guard review.
+This prevents the nested `package-install' from being intercepted after
+`package-reinstall' has already deleted the installed package."
+  (package-upgrade-guard--call-with-guard-disabled orig-fun pkg))
 
 (defun package-upgrade-guard--advice-package-upgrade-all
     (orig-fun &optional query)

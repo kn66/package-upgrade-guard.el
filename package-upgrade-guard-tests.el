@@ -64,6 +64,49 @@ DIR is used as the descriptor's installed directory when non-nil."
       (should called)
       (should-not reviewed))))
 
+(ert-deftest package-upgrade-guard-reinstall-bypasses-review ()
+  "Reinstallation must not be affected by guard review."
+  (let ((package-upgrade-guard-enabled t)
+        called
+        enabled-during-call)
+    (package-upgrade-guard--advice-package-reinstall
+     (lambda (pkg)
+       (setq called pkg)
+       (setq enabled-during-call package-upgrade-guard-enabled))
+     'pkg)
+    (should (eq called 'pkg))
+    (should-not enabled-during-call)
+    (should package-upgrade-guard-enabled)))
+
+(ert-deftest package-upgrade-guard-reinstall-restores-built-in-policy ()
+  "Reinstallation must use the policy that preceded guard activation."
+  (let ((package-upgrade-guard-enabled t)
+        (package-upgrade-guard--built-in-review-active t)
+        (package-upgrade-guard--saved-package-review-policy-bound t)
+        (package-upgrade-guard--saved-package-review-policy 'original)
+        policy-during-call)
+    (cl-progv '(package-review-policy) '(t)
+      (package-upgrade-guard--advice-package-reinstall
+       (lambda (_pkg)
+         (setq policy-during-call (symbol-value 'package-review-policy)))
+       'pkg)
+      (should (eq (symbol-value 'package-review-policy) t)))
+    (should (eq policy-during-call 'original))))
+
+(ert-deftest package-upgrade-guard-reinstall-advice-follows-lifecycle ()
+  "Enabling and disabling the guard must add and remove reinstall advice."
+  (let ((package-upgrade-guard-prefer-built-in-review nil))
+    (unwind-protect
+        (progn
+          (package-upgrade-guard--enable)
+          (should
+           (advice-member-p #'package-upgrade-guard--advice-package-reinstall
+                            'package-reinstall)))
+      (package-upgrade-guard--disable))
+    (should-not
+     (advice-member-p #'package-upgrade-guard--advice-package-reinstall
+                      'package-reinstall))))
+
 (ert-deftest package-upgrade-guard-artifact-digest-must-match-review ()
   "Installation must reject package bytes that differ from the review."
   (let* ((pkg-desc (package-upgrade-guard-test--desc 'pkg '(1 0)))
@@ -132,62 +175,73 @@ DIR is used as the descriptor's installed directory when non-nil."
 
 (ert-deftest package-upgrade-guard-limited-http-retrieval-aborts-early ()
   "An HTTP response exceeding the limit should stop its process immediately."
-  (let (response deleted)
-    (cl-letf (((symbol-function 'url-retrieve)
-               (lambda (_url _callback &rest _args)
-                 (setq response
-                       (generate-new-buffer
-                        " *package-upgrade-guard-http-large*"))
-                 (with-current-buffer response
-                   (set-buffer-multibyte nil)
-                   (setq-local url-http-end-of-headers
-                               (copy-marker (point-min))))
-                 response))
-              ((symbol-function 'get-buffer-process)
-               (lambda (_buffer) 'package-upgrade-guard-test-process))
-              ((symbol-function 'process-live-p) (lambda (_process) t))
-              ((symbol-function 'delete-process)
-               (lambda (_process) (setq deleted t)))
-              ((symbol-function 'accept-process-output)
-               (lambda (&rest _args)
-                 (with-current-buffer response
-                   (insert (make-string 11 ?x)))
-                 nil)))
-      (should-error
-       (package-upgrade-guard--retrieve-url-limited
-        "https://example.invalid/pkg.tar" 10))
-      (should deleted)
-      (should-not (buffer-live-p response)))))
+  (let (response process)
+    (unwind-protect
+        (cl-letf (((symbol-function 'url-retrieve)
+                   (lambda (_url _callback &rest _args)
+                     (setq response
+                           (generate-new-buffer
+                            " *package-upgrade-guard-http-large*"))
+                     (setq process
+                           (make-pipe-process
+                            :name (generate-new-buffer-name
+                                   "package-upgrade-guard-test-http")
+                            :buffer response
+                            :noquery t))
+                     (with-current-buffer response
+                       (set-buffer-multibyte nil)
+                       (setq-local url-http-end-of-headers
+                                   (copy-marker (point-min))))
+                     response))
+                  ((symbol-function 'accept-process-output)
+                   (lambda (&rest _args)
+                     (with-current-buffer response
+                       (insert (make-string 11 ?x)))
+                     nil)))
+          (should-error
+           (package-upgrade-guard--retrieve-url-limited
+            "https://example.invalid/pkg.tar" 10))
+          (should-not (process-live-p process))
+          (should-not (buffer-live-p response)))
+      (when (and process (process-live-p process))
+        (delete-process process))
+      (when (and response (buffer-live-p response))
+        (kill-buffer response)))))
 
 (ert-deftest package-upgrade-guard-limited-http-retrieval-times-out ()
   "A stalled HTTP response should stop after the configured timeout."
   (let ((package-upgrade-guard-download-timeout 1)
         (clock 0)
         response
-        deleted)
-    (cl-letf (((symbol-function 'url-retrieve)
-               (lambda (_url _callback &rest _args)
-                 (setq response
-                       (generate-new-buffer
-                        " *package-upgrade-guard-http-stalled*"))))
-              ((symbol-function 'float-time)
-               (lambda (&optional _time)
-                 (prog1 clock
-                   (setq clock (+ clock 2)))))
-              ((symbol-function 'get-buffer-process)
-               (lambda (_buffer) 'package-upgrade-guard-test-process))
-              ((symbol-function 'process-live-p) (lambda (_process) t))
-              ((symbol-function 'delete-process)
-               (lambda (_process) (setq deleted t)))
-              ((symbol-function 'accept-process-output)
-               (lambda (&rest _args) nil)))
-      (let ((err
-             (should-error
-              (package-upgrade-guard--retrieve-url-limited
-               "https://example.invalid/pkg.tar" 10))))
-        (should (string-match-p "timed out" (error-message-string err))))
-      (should deleted)
-      (should-not (buffer-live-p response)))))
+        process)
+    (unwind-protect
+        (cl-letf (((symbol-function 'url-retrieve)
+                   (lambda (_url _callback &rest _args)
+                     (setq response
+                           (generate-new-buffer
+                            " *package-upgrade-guard-http-stalled*"))
+                     (setq process
+                           (make-pipe-process
+                            :name (generate-new-buffer-name
+                                   "package-upgrade-guard-test-http")
+                            :buffer response
+                            :noquery t))
+                     response))
+                  ((symbol-function 'float-time)
+                   (lambda (&optional _time)
+                     (prog1 clock
+                       (setq clock (+ clock 2))))))
+          (let ((err
+                 (should-error
+                  (package-upgrade-guard--retrieve-url-limited
+                   "https://example.invalid/pkg.tar" 10))))
+            (should (string-match-p "timed out" (error-message-string err))))
+          (should-not (process-live-p process))
+          (should-not (buffer-live-p response)))
+      (when (and process (process-live-p process))
+        (delete-process process))
+      (when (and response (buffer-live-p response))
+        (kill-buffer response)))))
 
 (ert-deftest package-upgrade-guard-unreviewed-upgrade-dependency-is-rejected ()
   "An unreviewed dependency that was not a direct install must fail closed."
