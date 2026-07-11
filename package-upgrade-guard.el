@@ -175,6 +175,8 @@ All other artifacts must match a digest recorded during review."
 (defun package-upgrade-guard--install-reviewed-vc-commit (pkg-desc)
   "Install PKG-DESC at its reviewed commit without another network fetch."
   (package-upgrade-guard--verify-reviewed-vc-commit pkg-desc)
+  (unless (require 'package-vc nil t)
+    (error "This Emacs does not provide package-vc"))
   (unless (fboundp 'package-vc--unpack-1)
     (error "This Emacs cannot activate a pinned VC package"))
   (let* ((key (package-desc-full-name pkg-desc))

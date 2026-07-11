@@ -1089,6 +1089,7 @@ DIR is used as the descriptor's installed directory when non-nil."
          (pkg-desc (package-upgrade-guard-test--desc 'pkg '(2 0) pkg-dir))
          (key (package-desc-full-name pkg-desc))
          original-called
+         required
          unpacked)
     (unwind-protect
         (progn
@@ -1100,11 +1101,15 @@ DIR is used as the descriptor's installed directory when non-nil."
                        (if (equal (car args) "status") "" "reviewed")))
                     ((symbol-function 'call-process)
                      (lambda (&rest _args) 0))
+                    ((symbol-function 'require)
+                     (lambda (feature &optional _filename _noerror)
+                       (setq required feature)))
                     ((symbol-function 'package-vc--unpack-1)
                      (lambda (_desc _dir) (setq unpacked t))))
             (package-upgrade-guard--call-with-reviewed-vc-commit
              (lambda (&rest _args) (setq original-called t))
              pkg-desc pkg-desc)
+            (should (eq required 'package-vc))
             (should unpacked)
             (should-not original-called)))
       (remhash key package-upgrade-guard--reviewed-vc-commits)
